@@ -1,0 +1,2 @@
+[console_scripts]
+musiq = musiq.cli:cli

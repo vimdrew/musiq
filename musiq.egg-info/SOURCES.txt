@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+musiq/__init__.py
+musiq/cli.py
+musiq/display.py
+musiq/downloader.py
+musiq/history.py
+musiq/itunes.py
+musiq/perf.py
+musiq/spotify.py
+musiq/tagger.py
+musiq.egg-info/PKG-INFO
+musiq.egg-info/SOURCES.txt
+musiq.egg-info/dependency_links.txt
+musiq.egg-info/entry_points.txt
+musiq.egg-info/requires.txt
+musiq.egg-info/top_level.txt

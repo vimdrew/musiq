@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "musiq"
+version = "0.2.0"
+description = "Download music from Spotify to MP3 — pure yt-dlp + eyeD3 + iTunes API"
+requires-python = ">=3.10"
+dependencies = [
+    "yt-dlp>=2026",
+    "eyed3>=0.9",
+    "requests>=2",
+    "beautifulsoup4>=4",
+    "rich>=13",
+    "click>=8",
+    "term-image>=0.7",
+]
+
+[project.scripts]
+musiq = "musiq.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["musiq*"]

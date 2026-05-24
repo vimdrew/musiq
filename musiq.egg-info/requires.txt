@@ -1,0 +1,6 @@
+yt-dlp>=2026
+eyed3>=0.9
+requests>=2
+beautifulsoup4>=4
+rich>=13
+click>=8
