@@ -6,6 +6,19 @@ import requests
 
 from musiq.display import console
 
+GENRE_MAP = {
+    "Hip-Hop/Rap": "Hip-Hop",
+    "R&B/Soul": "R&B",
+    "Singer/Songwriter": "Folk",
+    "Alternative/Indie": "Alternative",
+    "Dance/Electronic": "Electronic",
+    "Pop/Rock": "Rock",
+}
+
+
+def normalise_genre(genre: str) -> str:
+    return GENRE_MAP.get(genre, genre)
+
 
 def tag_file(
     filepath: Path,
@@ -31,7 +44,8 @@ def tag_file(
         audio.tag.artist = artist
         audio.tag.album = album
         audio.tag.track_num = track_number
-        audio.tag.genre = genre if genre else None
+        normalised = normalise_genre(genre) if genre else None
+        audio.tag.genre = normalised
         if year:
             try:
                 audio.tag.recording_date = eyed3.core.Date(int(year))

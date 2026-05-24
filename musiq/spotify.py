@@ -1,7 +1,5 @@
 import json
 import re
-import urllib.parse
-from typing import Literal
 
 import requests
 from bs4 import BeautifulSoup
@@ -12,10 +10,6 @@ EMBED_BASE = "https://open.spotify.com/embed"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
 }
-
-_SPOTIFY_API_CLIENT = "5f573c9620494bae87890c0f08a60293"
-_SPOTIFY_API_SECRET = "212476d9b0f3472eaa762d90b19b0ba8"
-_api_token: str = ""
 
 
 class SpotifyError(Exception):
@@ -33,11 +27,6 @@ def extract_id_and_type(url: str) -> tuple[str, str]:
 
 def parse_url(url: str) -> tuple[str, str]:
     return extract_id_and_type(url)
-
-
-def resolve_url(url: str) -> tuple[Literal["track", "album", "playlist"], str]:
-    t, eid = extract_id_and_type(url)
-    return t, eid
 
 
 # ── Embed scraper ─────────────────────────────────────────────────
@@ -187,104 +176,16 @@ def _navigate_entity(data: dict) -> dict | None:
     return None
 
 
-# ── Album / Playlist (via API — embed no longer serves track list) ─
-
-def _ensure_api_token() -> str:
-    global _api_token
-    if _api_token:
-        return _api_token
-    import base64
-    creds = base64.b64encode(f"{_SPOTIFY_API_CLIENT}:{_SPOTIFY_API_SECRET}".encode()).decode()
-    resp = requests.post(
-        "https://accounts.spotify.com/api/token",
-        headers={"Authorization": f"Basic {creds}"},
-        data={"grant_type": "client_credentials"},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    _api_token = resp.json()["access_token"]
-    return _api_token
-
-
-def _api_get(path_or_url: str, params: dict | None = None) -> dict:
-    token = _ensure_api_token()
-    url = path_or_url if path_or_url.startswith("http") else f"https://api.spotify.com/v1/{path_or_url.lstrip('/')}"
-    resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=15)
-    if resp.status_code == 401:
-        _api_token = ""
-        token = _ensure_api_token()
-        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
-
+# ── Album / Playlist (embed only) ─────────────────────────────────
 
 def resolve_album(url: str) -> list[dict] | None:
     _, sid = extract_id_and_type(url)
-    try:
-        d = _api_get(f"albums/{sid}")
-    except Exception as exc:
-        console.print(f"[yellow]⚠ Spotify API album lookup failed: {exc}[/yellow]")
-        console.print("[yellow]Falling back to embed track list for album...[/yellow]")
-        return _resolve_collection_from_embed("album", sid)
-
-    album_artists = [a["name"] for a in d.get("artists", [])]
-    album_name = d.get("name", "")
-    images = d.get("images", [])
-    cover = images[0]["url"] if images else None
-    release_date = d.get("release_date", "")
-
-    items = d.get("tracks", {}).get("items", [])
-    results = []
-    for t in items:
-        artists = [a["name"] for a in t.get("artists", [])]
-        results.append({
-            "id": t["id"],
-            "title": t.get("name", ""),
-            "artist": ", ".join(artists) if artists else ", ".join(album_artists),
-            "artists": artists or album_artists,
-            "album": album_name,
-            "album_id": sid,
-            "track_number": t.get("track_number", 0),
-            "duration_ms": t.get("duration_ms", 0),
-            "release_date": release_date,
-            "cover_url": cover,
-            "explicit": t.get("explicit", False),
-        })
-    return results if results else None
+    return _resolve_collection_from_embed("album", sid)
 
 
 def resolve_playlist(url: str) -> list[dict] | None:
     _, sid = extract_id_and_type(url)
-    try:
-        d = _api_get(f"playlists/{sid}")
-    except Exception as exc:
-        console.print(f"[yellow]⚠ Spotify API playlist lookup failed: {exc}[/yellow]")
-        console.print("[yellow]Falling back to embed track list for playlist...[/yellow]")
-        return _resolve_collection_from_embed("playlist", sid)
-
-    results = []
-    items = d.get("tracks", {}).get("items", [])
-    for item in items:
-        t = item.get("track") or item
-        if not isinstance(t, dict) or not t.get("id"):
-            continue
-        artists = [a["name"] for a in t.get("artists", [])]
-        album_data = t.get("album") or {}
-        images = album_data.get("images", []) if isinstance(album_data, dict) else []
-        results.append({
-            "id": t["id"],
-            "title": t.get("name", ""),
-            "artist": ", ".join(artists),
-            "artists": artists,
-            "album": album_data.get("name", "") if isinstance(album_data, dict) else "",
-            "album_id": album_data.get("id", "") if isinstance(album_data, dict) else "",
-            "track_number": t.get("track_number", 0),
-            "duration_ms": t.get("duration_ms", 0),
-            "release_date": album_data.get("release_date", "") if isinstance(album_data, dict) else "",
-            "cover_url": images[0]["url"] if images else None,
-            "explicit": t.get("explicit", False),
-        })
-    return results if results else None
+    return _resolve_collection_from_embed("playlist", sid)
 
 
 def _resolve_collection_from_embed(kind: str, sid: str) -> list[dict] | None:
@@ -320,23 +221,28 @@ def _resolve_collection_from_embed(kind: str, sid: str) -> list[dict] | None:
         return None
 
 
-# ── Search ────────────────────────────────────────────────────────
+# ── Search (via iTunes) ───────────────────────────────────────────
 
 def search_spotify(query: str) -> list[dict]:
     try:
-        d = _api_get("search", {"q": query, "type": "track", "limit": 10})
-        items = d.get("tracks", {}).get("items", [])
+        resp = requests.get(
+            "https://itunes.apple.com/search",
+            params={"term": query, "entity": "song", "limit": 10, "country": "US"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
         return [
             {
-                "id": t["id"],
-                "title": t["name"],
-                "artist": ", ".join(a["name"] for a in t["artists"]),
-                "artists": [a["name"] for a in t["artists"]],
-                "album": t["album"]["name"],
-                "duration_ms": t.get("duration_ms", 0),
-                "cover_url": t["album"]["images"][0]["url"] if t["album"].get("images") else None,
+                "id": str(r.get("trackId", "")),
+                "title": r.get("trackName", ""),
+                "artist": r.get("artistName", ""),
+                "artists": [r.get("artistName", "")],
+                "album": r.get("collectionName", ""),
+                "duration_ms": r.get("trackTimeMillis", 0) or 0,
+                "cover_url": (r.get("artworkUrl100") or "").replace("100x100", "1200x1200"),
             }
-            for t in items
+            for r in results
         ]
     except Exception as exc:
         console.print(f"[red]Search failed: {exc}[/red]")

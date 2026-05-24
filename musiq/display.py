@@ -1,10 +1,5 @@
-import warnings
-warnings.filterwarnings("ignore", message="It seems this process is not running within a terminal")
-
-from rich.console import Console, Group
+from rich.console import Console
 from rich.table import Table
-from rich.panel import Panel
-from rich.columns import Columns
 from rich.progress import (
     Progress,
     SpinnerColumn,
@@ -15,62 +10,8 @@ from rich.progress import (
 )
 from rich import box
 from rich.text import Text
-import requests
-import tempfile
-import os
 
 console = Console()
-
-
-def show_track_card(track: dict) -> None:
-    try:
-        art_widget = None
-        cover_url = track.get("cover_url") or ""
-        if cover_url:
-            try:
-                r = requests.get(cover_url, timeout=5)
-                tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                tmp.write(r.content)
-                tmp.close()
-                from term_image.image import AutoImage
-                art_widget = AutoImage(tmp.name, height=12)
-                os.unlink(tmp.name)
-            except Exception:
-                art_widget = Text("🎵", style="bold")
-
-        title = Text(track.get("title", "Unknown"), style="bold white")
-        artist = Text(track.get("artist", ""), style="cyan")
-
-        album = track.get("album", "") or ""
-        year = str(track.get("year", "")) if track.get("year") else ""
-        genre = track.get("genre", "") or ""
-        meta_parts = [p for p in [album, year, genre] if p]
-        meta_line = Text(" · ".join(meta_parts), style="dim") if meta_parts else Text("")
-
-        duration_ms = track.get("duration_ms", 0) or 0
-        total_sec = duration_ms // 1000
-        if total_sec:
-            mins, secs = divmod(total_sec, 60)
-            dur_str = f"{mins}:{secs:02d}"
-        else:
-            dur_str = "--:--"
-        bar = "█" * 20 + "░░░░░░░░"
-        duration_line = Text(f"{bar}  {dur_str}", style="dim")
-
-        text_lines = Group(title, artist, meta_line, duration_line)
-        content = Columns([art_widget, text_lines]) if art_widget else text_lines
-
-        console.print(Panel(
-            content,
-            title="[bold green]🎵  Now Downloading[/bold green]",
-            border_style="green",
-            padding=(1, 2),
-        ))
-    except Exception:
-        try:
-            console.print(f"🎵 {track.get('title', 'Unknown')} — {track.get('artist', '')}")
-        except Exception:
-            pass
 
 
 def make_progress() -> Progress:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yt_dlp
 
-from musiq.display import console, show_track_card
+from musiq.display import console
 from musiq.history import track_exists, add_download, insert_perf
 from musiq.itunes import search as itunes_search
 from musiq.perf import Timer, PerfRecord
@@ -97,14 +97,8 @@ def process_track(
                     "quiet": True,
                     "no_warnings": True,
                 }
-                show_track_card({
-                    "title": title,
-                    "artist": artist,
-                    "album": album,
-                    "year": meta.get("year"),
-                    "duration_ms": duration_ms,
-                    "cover_url": cover_url,
-                })
+                dur_str = f"{duration_sec // 60}:{duration_sec % 60:02d}" if duration_sec else "--:--"
+                console.print(f"[bold blue]⬇[/bold blue] [bold white]{title}[/bold white] — [cyan]{artist}[/cyan] [dim]({dur_str})[/dim]")
                 downloaded = _ytm_download(search_query, ydl_opts)
                 filesize_kb = int(downloaded.stat().st_size / 1024)
             except Exception as exc:

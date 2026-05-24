@@ -14,7 +14,6 @@ dependencies = [
     "beautifulsoup4>=4",
     "rich>=13",
     "click>=8",
-    "term-image>=0.7",
 ]
 
 [project.scripts]
