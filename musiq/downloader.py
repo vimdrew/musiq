@@ -13,7 +13,7 @@ from musiq.perf import Timer, PerfRecord
 from musiq.spotify import resolve_entity
 from musiq.tagger import tag_file
 
-OUTPUT_BASE = Path.home() / "Downloads" / "Music"
+OUTPUT_BASE = Path.home() / "Music"
 MUSIQ_DIR = Path.home() / ".musiq"
 
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*]')
@@ -22,6 +22,10 @@ _PARALLEL_LOCK = threading.Lock()
 
 def sanitize(name: str) -> str:
     return _INVALID_CHARS.sub("_", name.strip())
+
+
+def primary_artist(artist: str) -> str:
+    return artist.split(",")[0].strip()
 
 
 def _join_artists(meta: dict) -> str:
@@ -136,7 +140,7 @@ def process_track(
     year = spotify_year or itunes_meta.get("year", "")
     genre = itunes_meta.get("genre", "")
 
-    album_dir = OUTPUT_BASE / sanitize(artist) / sanitize(album)
+    album_dir = OUTPUT_BASE / sanitize(primary_artist(artist)) / sanitize(album)
     album_dir.mkdir(parents=True, exist_ok=True)
     out_stem = f"{track_num:02d} - {sanitize(artist)} - {sanitize(title)}"
     final_path = album_dir / f"{out_stem}.mp3"
