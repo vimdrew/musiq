@@ -1,30 +1,46 @@
 import requests
 
 
-def search(artist: str, title: str) -> dict:
+def _score_result(result: dict, title: str, artist: str) -> int:
+    score = 0
+    collection = result.get("collectionName", "")
+    track = result.get("trackName", "")
+
+    if collection.endswith("- Single"):
+        score -= 10
+    if collection.endswith("- EP"):
+        score -= 5
+
+    for word in ["Live", "Remix", "Karaoke", "Tribute", "Cover"]:
+        if word.lower() in collection.lower():
+            score -= 8
+
+    if track.lower() == title.lower():
+        score += 5
+
+    if result.get("artistName", "").lower() == artist.lower():
+        score += 3
+
+    return score
+
+
+def fetch_metadata(artist: str, title: str) -> dict:
     try:
         resp = requests.get(
             "https://itunes.apple.com/search",
             params={
                 "term": f"{artist} {title}",
                 "entity": "song",
-                "limit": 3,
+                "limit": 5,
                 "country": "US",
             },
             timeout=10,
         )
         resp.raise_for_status()
         results = resp.json().get("results", [])
-        for r in results:
-            r_artist = r.get("artistName", "").lower()
-            r_track = r.get("trackName", "").lower()
-            q_artist = artist.lower()
-            q_title = title.lower()
-            if q_artist in r_artist or r_artist in q_artist:
-                if q_title in r_track or r_track in q_title:
-                    return _extract(r)
         if results:
-            return _extract(results[0])
+            best = max(results, key=lambda r: _score_result(r, title, artist))
+            return _extract(best)
     except Exception:
         pass
     return {"genre": "", "year": "", "artwork_url": ""}

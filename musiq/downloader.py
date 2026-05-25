@@ -8,7 +8,7 @@ import yt_dlp
 
 from musiq.display import console
 from musiq.history import track_exists, add_download, insert_perf
-from musiq.itunes import search as itunes_search
+from musiq.itunes import fetch_metadata as itunes_search
 from musiq.perf import Timer, PerfRecord
 from musiq.spotify import resolve_entity
 from musiq.tagger import tag_file
