@@ -18,6 +18,7 @@ MUSIQ_DIR = Path.home() / ".musiq"
 
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*]')
 _PARALLEL_LOCK = threading.Lock()
+_CONFIDENCE_THRESHOLD = 0.6
 
 
 def sanitize(name: str) -> str:
@@ -177,8 +178,13 @@ def process_track(
         cover_url = ""
 
     spotify_year = meta.get("year")
-    year = spotify_year or itunes_meta.get("year", "")
-    genre = itunes_meta.get("genre", "")
+    confidence = itunes_meta.get("confidence", 0.0)
+    if confidence >= _CONFIDENCE_THRESHOLD:
+        genre = itunes_meta.get("genre", "")
+        year = spotify_year or itunes_meta.get("year", "")
+    else:
+        genre = meta.get("resolved_genre") or itunes_meta.get("genre", "")
+        year = spotify_year or meta.get("resolved_year") or itunes_meta.get("year", "")
 
     album_dir = OUTPUT_BASE / sanitize(primary_artist(artist)) / sanitize(album)
     album_dir.mkdir(parents=True, exist_ok=True)
@@ -247,6 +253,8 @@ def handle_url(
     if not no_itunes and len(tracks) > 1:
         itunes_cache: dict[str, dict] = {}
         album_name_votes: dict[str, int] = {}
+        genre_votes: dict[str, int] = {}
+        year_votes: dict[str, int] = {}
         console.print("[dim]Fetching iTunes metadata for album detection...[/dim]")
         for track in tracks:
             meta = itunes_search(
@@ -257,19 +265,31 @@ def handle_url(
                 sid = track.get("id", "")
                 if sid:
                     itunes_cache[sid] = meta
-                if meta.get("album"):
-                    name = meta["album"]
-                    album_name_votes[name] = album_name_votes.get(name, 0) + 1
+                confidence = meta.get("confidence", 0.0)
+                if confidence >= _CONFIDENCE_THRESHOLD:
+                    if meta.get("album"):
+                        album_name_votes[meta["album"]] = album_name_votes.get(meta["album"], 0) + 1
+                    if meta.get("genre"):
+                        genre_votes[meta["genre"]] = genre_votes.get(meta["genre"], 0) + 1
+                    if meta.get("year"):
+                        year_votes[str(meta["year"])] = year_votes.get(str(meta["year"]), 0) + 1
 
+        canonical_album = None
         if album_name_votes:
-            canonical = resolve_canonical_album(
+            canonical_album = resolve_canonical_album(
                 spotify_album=tracks[0].get("album"),
                 itunes_votes=album_name_votes,
                 track_title=tracks[0]["title"],
             )
-            for track in tracks:
-                track["resolved_album"] = canonical
-                track["_itunes_cache"] = itunes_cache.get(track.get("id", ""), {})
+        canonical_genre = max(genre_votes, key=genre_votes.get) if genre_votes else ""
+        canonical_year = max(year_votes, key=year_votes.get) if year_votes else ""
+
+        for track in tracks:
+            if canonical_album:
+                track["resolved_album"] = canonical_album
+            track["resolved_genre"] = canonical_genre
+            track["resolved_year"] = canonical_year
+            track["_itunes_cache"] = itunes_cache.get(track.get("id", ""), {})
 
     if dry_run:
         console.print(f"\n[bold]Would download {len(tracks)} track(s):[/bold]")

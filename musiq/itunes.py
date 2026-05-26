@@ -1,4 +1,16 @@
+from difflib import SequenceMatcher
+
 import requests
+
+
+def artist_match_confidence(expected: str, returned: str) -> float:
+    expected = expected.lower().strip()
+    returned = returned.lower().strip()
+    if expected == returned:
+        return 1.0
+    if expected in returned or returned in expected:
+        return 0.9
+    return SequenceMatcher(None, expected, returned).ratio()
 
 
 def _score_result(result: dict, title: str, artist: str) -> int:
@@ -40,10 +52,12 @@ def fetch_metadata(artist: str, title: str) -> dict:
         results = resp.json().get("results", [])
         if results:
             best = max(results, key=lambda r: _score_result(r, title, artist))
-            return _extract(best)
+            meta = _extract(best)
+            meta["confidence"] = artist_match_confidence(artist, best.get("artistName", ""))
+            return meta
     except Exception:
         pass
-    return {"genre": "", "year": "", "artwork_url": ""}
+    return {"genre": "", "year": "", "artwork_url": "", "album": "", "confidence": 0.0}
 
 
 def resolve_canonical_album(
