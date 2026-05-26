@@ -141,7 +141,7 @@ def resolve_embed_track_list(kind: str, sid: str) -> list[dict] | None:
 
         results = []
         for i, entry in enumerate(track_list):
-            uid = entry.get("uid", "")
+            uid = entry.get("uri", "").split(":")[-1] or entry.get("uid", "")
             if not uid:
                 continue
             results.append({
