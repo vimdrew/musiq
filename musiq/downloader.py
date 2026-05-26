@@ -28,6 +28,16 @@ def primary_artist(artist: str) -> str:
     return artist.split(",")[0].strip()
 
 
+def resolve_album_name(spotify_album: str | None, itunes_album: str | None, track_title: str) -> str:
+    if itunes_album and not itunes_album.endswith("- Single"):
+        return itunes_album
+    if spotify_album:
+        return spotify_album
+    if itunes_album:
+        return itunes_album
+    return f"{track_title} - Single"
+
+
 def _join_artists(meta: dict) -> str:
     artists = meta.get("artists") or []
     if artists:
@@ -126,10 +136,7 @@ def process_track(
             itunes_timer.__exit__(None, None, None)
             perf.t_itunes_ms = itunes_timer.elapsed_ms
 
-    if album is None and itunes_meta.get("album"):
-        album = itunes_meta["album"]
-    if album is None:
-        album = "Unknown Album"
+    album = resolve_album_name(meta.get("album"), itunes_meta.get("album"), title)
 
     if cover_url is None and itunes_meta.get("artwork_url"):
         cover_url = itunes_meta["artwork_url"]
