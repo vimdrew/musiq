@@ -46,6 +46,23 @@ def fetch_metadata(artist: str, title: str) -> dict:
     return {"genre": "", "year": "", "artwork_url": ""}
 
 
+def resolve_canonical_album(
+    spotify_album: str | None,
+    itunes_votes: dict[str, int],
+    track_title: str,
+) -> str:
+    if not itunes_votes:
+        return spotify_album or f"{track_title} - Single"
+
+    if spotify_album:
+        for name in sorted(itunes_votes, key=itunes_votes.get, reverse=True):
+            if spotify_album.lower() in name.lower() or name.lower() in spotify_album.lower():
+                return name
+        return spotify_album
+
+    return max(itunes_votes, key=itunes_votes.get)
+
+
 def _extract(r: dict) -> dict:
     artwork = (r.get("artworkUrl100") or "").replace("100x100", "1200x1200")
     year = ""

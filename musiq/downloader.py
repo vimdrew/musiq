@@ -8,7 +8,7 @@ import yt_dlp
 
 from musiq.display import console
 from musiq.history import track_exists, add_download, insert_perf
-from musiq.itunes import fetch_metadata as itunes_search
+from musiq.itunes import fetch_metadata as itunes_search, resolve_canonical_album
 from musiq.perf import Timer, PerfRecord
 from musiq.spotify import resolve_entity
 from musiq.tagger import tag_file
@@ -82,18 +82,57 @@ def process_track(
     total_timer = Timer()
     total_timer.__enter__()
 
-    from concurrent.futures import ThreadPoolExecutor
-    itunes_future = None
-    itunes_timer = None
+    itunes_meta = meta.get("_itunes_cache", {})
+    itunes_cached = bool(itunes_meta)
 
-    with ThreadPoolExecutor(max_workers=1) as ex:
-        if not no_itunes:
-            itunes_timer = Timer()
-            itunes_timer.__enter__()
+    if not itunes_cached and not no_itunes:
+        from concurrent.futures import ThreadPoolExecutor
+        itunes_timer = Timer()
+        itunes_timer.__enter__()
+        with ThreadPoolExecutor(max_workers=1) as ex:
             itunes_future = ex.submit(itunes_search, artist, title)
-        else:
-            perf.t_itunes_ms = 0
 
+            with Timer() as t_dl:
+                try:
+                    temp_dir = Path(tempfile.mkdtemp(prefix="musiq_"))
+                    search_query = f"ytsearch1:{title} {artist}"
+                    ydl_opts = {
+                        "format": "bestaudio/best",
+                        "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
+                        "postprocessors": [
+                            {
+                                "key": "FFmpegExtractAudio",
+                                "preferredcodec": "mp3",
+                                "preferredquality": "320",
+                            }
+                        ],
+                        "quiet": True,
+                        "no_warnings": True,
+                    }
+                    dur_str = f"{duration_sec // 60}:{duration_sec % 60:02d}" if duration_sec else "--:--"
+                    console.print(f"[bold blue]⬇[/bold blue] [bold white]{title}[/bold white] — [cyan]{artist}[/cyan] [dim]({dur_str})[/dim]")
+                    downloaded = _ytm_download(search_query, ydl_opts)
+                    filesize_kb = int(downloaded.stat().st_size / 1024)
+                except Exception as exc:
+                    console.print(f"  [red]✖ Download failed for {title}: {exc}[/red]")
+                    perf.status = "failed"
+                    total_timer.__exit__(None, None, None)
+                    perf.t_total_ms = total_timer.elapsed_ms
+                    perf.t_download_ms = t_dl.elapsed_ms
+                    itunes_timer.__exit__(None, None, None)
+                    perf.t_itunes_ms = itunes_timer.elapsed_ms
+                    insert_perf(perf)
+                    return {"status": "failed", "title": title, "artist": artist, "duration": duration_sec}
+            perf.t_download_ms = t_dl.elapsed_ms
+            perf.filesize_kb = filesize_kb
+            perf.bitrate_kbps = 320
+
+            if itunes_future is not None:
+                itunes_meta = itunes_future.result()
+        itunes_timer.__exit__(None, None, None)
+        perf.t_itunes_ms = itunes_timer.elapsed_ms
+    else:
+        perf.t_itunes_ms = 0
         with Timer() as t_dl:
             try:
                 temp_dir = Path(tempfile.mkdtemp(prefix="musiq_"))
@@ -121,22 +160,16 @@ def process_track(
                 total_timer.__exit__(None, None, None)
                 perf.t_total_ms = total_timer.elapsed_ms
                 perf.t_download_ms = t_dl.elapsed_ms
-                if itunes_timer:
-                    itunes_timer.__exit__(None, None, None)
-                    perf.t_itunes_ms = itunes_timer.elapsed_ms
                 insert_perf(perf)
                 return {"status": "failed", "title": title, "artist": artist, "duration": duration_sec}
         perf.t_download_ms = t_dl.elapsed_ms
         perf.filesize_kb = filesize_kb
         perf.bitrate_kbps = 320
 
-        itunes_meta = {}
-        if itunes_future is not None:
-            itunes_meta = itunes_future.result()
-            itunes_timer.__exit__(None, None, None)
-            perf.t_itunes_ms = itunes_timer.elapsed_ms
-
-    album = resolve_album_name(meta.get("album"), itunes_meta.get("album"), title)
+    if meta.get("resolved_album"):
+        album = meta["resolved_album"]
+    else:
+        album = resolve_album_name(meta.get("album"), itunes_meta.get("album"), title)
 
     if cover_url is None and itunes_meta.get("artwork_url"):
         cover_url = itunes_meta["artwork_url"]
@@ -210,6 +243,33 @@ def handle_url(
     if not tracks:
         console.print("[red]✖ No tracks found from URL[/red]")
         return []
+
+    if not no_itunes and len(tracks) > 1:
+        itunes_cache: dict[str, dict] = {}
+        album_name_votes: dict[str, int] = {}
+        console.print("[dim]Fetching iTunes metadata for album detection...[/dim]")
+        for track in tracks:
+            meta = itunes_search(
+                _join_artists(track),
+                track.get("title", ""),
+            )
+            if meta:
+                sid = track.get("id", "")
+                if sid:
+                    itunes_cache[sid] = meta
+                if meta.get("album"):
+                    name = meta["album"]
+                    album_name_votes[name] = album_name_votes.get(name, 0) + 1
+
+        if album_name_votes:
+            canonical = resolve_canonical_album(
+                spotify_album=tracks[0].get("album"),
+                itunes_votes=album_name_votes,
+                track_title=tracks[0]["title"],
+            )
+            for track in tracks:
+                track["resolved_album"] = canonical
+                track["_itunes_cache"] = itunes_cache.get(track.get("id", ""), {})
 
     if dry_run:
         console.print(f"\n[bold]Would download {len(tracks)} track(s):[/bold]")
