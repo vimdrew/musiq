@@ -31,10 +31,10 @@ def primary_artist(artist: str) -> str:
 
 
 def resolve_album_name(spotify_album: str | None, itunes_album: str | None, track_title: str) -> str:
-    if itunes_album and not itunes_album.endswith("- Single"):
-        return itunes_album
     if spotify_album:
         return spotify_album
+    if itunes_album and not itunes_album.endswith("- Single"):
+        return itunes_album
     if itunes_album:
         return itunes_album
     return f"{track_title} - Single"
