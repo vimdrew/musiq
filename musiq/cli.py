@@ -1,3 +1,7 @@
+import subprocess
+import sys
+from pathlib import Path
+
 import click
 from rich.table import Table
 
@@ -119,6 +123,42 @@ def stats():
         console.print("[yellow]No performance data yet. Download some tracks first.[/yellow]")
         return
     console.print(stats_table(s))
+
+
+def _project_root() -> Path | None:
+    pkg_dir = Path(__file__).resolve().parent
+    for parent in [pkg_dir, *pkg_dir.parents]:
+        if (parent / ".git").is_dir():
+            return parent
+    return None
+
+
+@cli.command()
+def update():
+    """Pull latest code and reinstall dependencies."""
+    root = _project_root()
+    if root is None:
+        console.print("[red]✖ Not a git repository — cannot update[/red]")
+        return
+
+    console.print("[bold]Pulling latest code...[/bold]")
+    r = subprocess.run(["git", "pull"], cwd=root, capture_output=True, text=True)
+    if r.returncode != 0:
+        console.print(f"[red]✖ git pull failed:\n{r.stderr}[/red]")
+        return
+    console.print(r.stdout)
+
+    console.print("[bold]Reinstalling dependencies...[/bold]")
+    r = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", str(root)],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        console.print(f"[red]✖ pip install failed:\n{r.stderr}[/red]")
+        return
+    console.print(r.stdout)
+
+    console.print("[green]✓ Update complete[/green]")
 
 
 if __name__ == "__main__":
