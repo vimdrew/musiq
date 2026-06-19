@@ -9,6 +9,7 @@ description = "Download music from Spotify to MP3 — pure yt-dlp + eyeD3 + iTun
 requires-python = ">=3.10"
 dependencies = [
     "yt-dlp>=2026",
+    "ytmusicapi>=1.12",
     "eyed3>=0.9",
     "requests>=2",
     "beautifulsoup4>=4",

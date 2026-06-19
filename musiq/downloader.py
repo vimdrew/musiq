@@ -12,6 +12,7 @@ from musiq.itunes import fetch_metadata as itunes_search, resolve_canonical_albu
 from musiq.perf import Timer, PerfRecord
 from musiq.spotify import resolve_entity
 from musiq.tagger import tag_file
+from musiq.ytmusic import search_song
 
 OUTPUT_BASE = Path.home() / "Music"
 MUSIQ_DIR = Path.home() / ".musiq"
@@ -83,6 +84,14 @@ def process_track(
     total_timer = Timer()
     total_timer.__enter__()
 
+    with Timer() as t_search:
+        video_url = None
+        if title != "Unknown":
+            yt_result = search_song(title, artist)
+            if yt_result:
+                video_url = f"https://www.youtube.com/watch?v={yt_result['video_id']}"
+    perf.t_search_ms = t_search.elapsed_ms
+
     itunes_meta = meta.get("_itunes_cache", {})
     itunes_cached = bool(itunes_meta)
 
@@ -96,7 +105,7 @@ def process_track(
             with Timer() as t_dl:
                 try:
                     temp_dir = Path(tempfile.mkdtemp(prefix="musiq_"))
-                    search_query = f"ytsearch1:{title} {artist}"
+                    dl_url = video_url or f"ytsearch1:{title} {artist}"
                     ydl_opts = {
                         "format": "bestaudio/best",
                         "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
@@ -112,7 +121,7 @@ def process_track(
                     }
                     dur_str = f"{duration_sec // 60}:{duration_sec % 60:02d}" if duration_sec else "--:--"
                     console.print(f"[bold blue]⬇[/bold blue] [bold white]{title}[/bold white] — [cyan]{artist}[/cyan] [dim]({dur_str})[/dim]")
-                    downloaded = _ytm_download(search_query, ydl_opts)
+                    downloaded = _ytm_download(dl_url, ydl_opts)
                     filesize_kb = int(downloaded.stat().st_size / 1024)
                 except Exception as exc:
                     console.print(f"  [red]✖ Download failed for {title}: {exc}[/red]")
@@ -125,11 +134,11 @@ def process_track(
                     insert_perf(perf)
                     return {"status": "failed", "title": title, "artist": artist, "duration": duration_sec}
             perf.t_download_ms = t_dl.elapsed_ms
-            perf.filesize_kb = filesize_kb
-            perf.bitrate_kbps = 320
+        perf.filesize_kb = filesize_kb
+        perf.bitrate_kbps = 320
 
-            if itunes_future is not None:
-                itunes_meta = itunes_future.result()
+        if itunes_future is not None:
+            itunes_meta = itunes_future.result()
         itunes_timer.__exit__(None, None, None)
         perf.t_itunes_ms = itunes_timer.elapsed_ms
     else:
@@ -137,7 +146,7 @@ def process_track(
         with Timer() as t_dl:
             try:
                 temp_dir = Path(tempfile.mkdtemp(prefix="musiq_"))
-                search_query = f"ytsearch1:{title} {artist}"
+                dl_url = video_url or f"ytsearch1:{title} {artist}"
                 ydl_opts = {
                     "format": "bestaudio/best",
                     "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
@@ -153,7 +162,7 @@ def process_track(
                 }
                 dur_str = f"{duration_sec // 60}:{duration_sec % 60:02d}" if duration_sec else "--:--"
                 console.print(f"[bold blue]⬇[/bold blue] [bold white]{title}[/bold white] — [cyan]{artist}[/cyan] [dim]({dur_str})[/dim]")
-                downloaded = _ytm_download(search_query, ydl_opts)
+                downloaded = _ytm_download(dl_url, ydl_opts)
                 filesize_kb = int(downloaded.stat().st_size / 1024)
             except Exception as exc:
                 console.print(f"  [red]✖ Download failed for {title}: {exc}[/red]")

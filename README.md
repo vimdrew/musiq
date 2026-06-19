@@ -69,8 +69,8 @@ musiq stats
 
 1. **Scrape** Spotify embed → `__NEXT_DATA__` JSON (title, artist, album, track#)
 2. **Fetch** iTunes Search API → genre, year, high-res artwork
-3. **Search** YouTube Music via `yt-dlp "ytsearchmusic1:..."` for best match
-4. **Download** best audio → FFmpeg → MP3 320 kbps
+3. **Search** YouTube Music via `ytmusicapi` for best matching song → video ID
+4. **Download** video via yt-dlp → FFmpeg → MP3 320 kbps
 5. **Tag** with eyeD3: title, artist, album, track#, year, genre + cover art
 6. **Save** to `~/Downloads/Music/<Artist>/<Album>/<NN - Artist - Title.mp3>`
 7. **Record** in SQLite history + performance log
@@ -106,6 +106,7 @@ musiq/
 │   ├── cli.py          # click commands
 │   ├── spotify.py      # __NEXT_DATA__ scraper + Spotify search
 │   ├── itunes.py       # iTunes Search API client
+│   ├── ytmusic.py      # ytmusicapi wrapper for YT Music search
 │   ├── downloader.py   # yt-dlp wrapper + pipeline orchestrator
 │   ├── tagger.py       # eyeD3 ID3 + cover art writer
 │   ├── history.py      # SQLite history + perf_log
