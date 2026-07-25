@@ -1,5 +1,5 @@
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -32,3 +32,7 @@ class Timer:
 
     def __exit__(self, *args):
         self.elapsed_ms = int((time.perf_counter() - self.start) * 1000)
+
+    def stop(self) -> int:
+        self.elapsed_ms = int((time.perf_counter() - self.start) * 1000)
+        return self.elapsed_ms

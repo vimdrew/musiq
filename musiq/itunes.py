@@ -1,16 +1,8 @@
-from difflib import SequenceMatcher
+import os
 
 import requests
 
-
-def artist_match_confidence(expected: str, returned: str) -> float:
-    expected = expected.lower().strip()
-    returned = returned.lower().strip()
-    if expected == returned:
-        return 1.0
-    if expected in returned or returned in expected:
-        return 0.9
-    return SequenceMatcher(None, expected, returned).ratio()
+from musiq.utils import artist_match as artist_match_confidence
 
 
 def _score_result(result: dict, title: str, artist: str) -> int:
@@ -36,6 +28,10 @@ def _score_result(result: dict, title: str, artist: str) -> int:
     return score
 
 
+def _itunes_country() -> str:
+    return os.environ.get("MUSIQ_ITUNES_COUNTRY", "US")
+
+
 def fetch_metadata(artist: str, title: str) -> dict:
     try:
         resp = requests.get(
@@ -44,7 +40,7 @@ def fetch_metadata(artist: str, title: str) -> dict:
                 "term": f"{artist} {title}",
                 "entity": "song",
                 "limit": 5,
-                "country": "US",
+                "country": _itunes_country(),
             },
             timeout=10,
         )

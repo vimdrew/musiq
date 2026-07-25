@@ -47,6 +47,33 @@ def _join_artists(meta: dict) -> str:
     return meta.get("artist", "Unknown Artist")
 
 
+def _do_download(
+    dl_url: str,
+    ydl_opts: dict,
+    title: str,
+    artist: str,
+    duration_sec: int,
+    perf: PerfRecord,
+) -> tuple[Path, int] | None:
+    dur_str = f"{duration_sec // 60}:{duration_sec % 60:02d}" if duration_sec else "--:--"
+    console.print(f"[bold blue]⬇[/bold blue] [bold white]{title}[/bold white] — [cyan]{artist}[/cyan] [dim]({dur_str})[/dim]")
+    with Timer() as t_dl:
+        try:
+            downloaded = _ytm_download(dl_url, ydl_opts)
+            filesize_kb = int(downloaded.stat().st_size / 1024)
+        except Exception as exc:
+            console.print(f"  [red]✖ Download failed for {title}: {exc}[/red]")
+            t_dl.stop()
+            perf.t_download_ms = t_dl.elapsed_ms
+            perf.status = "failed"
+            return None
+        t_dl.stop()
+        perf.t_download_ms = t_dl.elapsed_ms
+        perf.filesize_kb = filesize_kb
+        perf.bitrate_kbps = 320
+        return downloaded, filesize_kb
+
+
 def process_track(
     meta: dict,
     *,
@@ -81,141 +108,102 @@ def process_track(
         console.print(f"  [cyan]Would download:[/cyan] {title} — {artist}")
         return {"status": "dry-run", "title": title, "artist": artist, "duration": duration_sec}
 
-    total_timer = Timer()
-    total_timer.__enter__()
+    with Timer() as total_timer:
+        with Timer() as t_search:
+            video_url = None
+            if title != "Unknown":
+                yt_result = search_song(title, artist)
+                if yt_result:
+                    video_url = f"https://www.youtube.com/watch?v={yt_result['video_id']}"
+        perf.t_search_ms = t_search.elapsed_ms
 
-    with Timer() as t_search:
-        video_url = None
-        if title != "Unknown":
-            yt_result = search_song(title, artist)
-            if yt_result:
-                video_url = f"https://www.youtube.com/watch?v={yt_result['video_id']}"
-    perf.t_search_ms = t_search.elapsed_ms
+        itunes_meta = meta.get("_itunes_cache", {})
+        itunes_cached = bool(itunes_meta)
 
-    itunes_meta = meta.get("_itunes_cache", {})
-    itunes_cached = bool(itunes_meta)
-
-    if not itunes_cached and not no_itunes:
-        from concurrent.futures import ThreadPoolExecutor
-        itunes_timer = Timer()
-        itunes_timer.__enter__()
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            itunes_future = ex.submit(itunes_search, artist, title)
-
-            with Timer() as t_dl:
-                try:
-                    temp_dir = Path(tempfile.mkdtemp(prefix="musiq_"))
-                    dl_url = video_url or f"ytsearch1:{title} {artist}"
-                    ydl_opts = {
-                        "format": "bestaudio/best",
-                        "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
-                        "postprocessors": [
-                            {
-                                "key": "FFmpegExtractAudio",
-                                "preferredcodec": "mp3",
-                                "preferredquality": "320",
-                            }
-                        ],
-                        "quiet": True,
-                        "no_warnings": True,
-                    }
-                    dur_str = f"{duration_sec // 60}:{duration_sec % 60:02d}" if duration_sec else "--:--"
-                    console.print(f"[bold blue]⬇[/bold blue] [bold white]{title}[/bold white] — [cyan]{artist}[/cyan] [dim]({dur_str})[/dim]")
-                    downloaded = _ytm_download(dl_url, ydl_opts)
-                    filesize_kb = int(downloaded.stat().st_size / 1024)
-                except Exception as exc:
-                    console.print(f"  [red]✖ Download failed for {title}: {exc}[/red]")
-                    perf.status = "failed"
-                    total_timer.__exit__(None, None, None)
-                    perf.t_total_ms = total_timer.elapsed_ms
-                    perf.t_download_ms = t_dl.elapsed_ms
-                    itunes_timer.__exit__(None, None, None)
-                    perf.t_itunes_ms = itunes_timer.elapsed_ms
-                    insert_perf(perf)
-                    return {"status": "failed", "title": title, "artist": artist, "duration": duration_sec}
-            perf.t_download_ms = t_dl.elapsed_ms
-        perf.filesize_kb = filesize_kb
-        perf.bitrate_kbps = 320
-
-        if itunes_future is not None:
-            itunes_meta = itunes_future.result()
-        itunes_timer.__exit__(None, None, None)
-        perf.t_itunes_ms = itunes_timer.elapsed_ms
-    else:
-        perf.t_itunes_ms = 0
-        with Timer() as t_dl:
-            try:
-                temp_dir = Path(tempfile.mkdtemp(prefix="musiq_"))
-                dl_url = video_url or f"ytsearch1:{title} {artist}"
-                ydl_opts = {
-                    "format": "bestaudio/best",
-                    "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
-                    "postprocessors": [
-                        {
-                            "key": "FFmpegExtractAudio",
-                            "preferredcodec": "mp3",
-                            "preferredquality": "320",
-                        }
-                    ],
-                    "quiet": True,
-                    "no_warnings": True,
+        temp_dir = Path(tempfile.mkdtemp(prefix="musiq_"))
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "320",
                 }
-                dur_str = f"{duration_sec // 60}:{duration_sec % 60:02d}" if duration_sec else "--:--"
-                console.print(f"[bold blue]⬇[/bold blue] [bold white]{title}[/bold white] — [cyan]{artist}[/cyan] [dim]({dur_str})[/dim]")
-                downloaded = _ytm_download(dl_url, ydl_opts)
-                filesize_kb = int(downloaded.stat().st_size / 1024)
-            except Exception as exc:
-                console.print(f"  [red]✖ Download failed for {title}: {exc}[/red]")
-                perf.status = "failed"
-                total_timer.__exit__(None, None, None)
+            ],
+            "quiet": True,
+            "no_warnings": True,
+        }
+        dl_url = video_url or f"ytsearch1:{title} {artist}"
+
+        if not itunes_cached and not no_itunes:
+            from concurrent.futures import ThreadPoolExecutor
+            with Timer() as itunes_timer:
+                with ThreadPoolExecutor(max_workers=1) as ex:
+                    itunes_future = ex.submit(itunes_search, artist, title)
+                    dl_result = _do_download(dl_url, ydl_opts, title, artist, duration_sec, perf)
+                    if dl_result is None:
+                        total_timer.stop()
+                        perf.t_total_ms = total_timer.elapsed_ms
+                        itunes_timer.stop()
+                        perf.t_itunes_ms = itunes_timer.elapsed_ms
+                        insert_perf(perf)
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        return {"status": "failed", "title": title, "artist": artist, "duration": duration_sec}
+                    downloaded, filesize_kb = dl_result
+                itunes_meta = itunes_future.result()
+            perf.t_itunes_ms = itunes_timer.elapsed_ms
+        else:
+            perf.t_itunes_ms = 0
+            dl_result = _do_download(dl_url, ydl_opts, title, artist, duration_sec, perf)
+            if dl_result is None:
+                total_timer.stop()
                 perf.t_total_ms = total_timer.elapsed_ms
-                perf.t_download_ms = t_dl.elapsed_ms
                 insert_perf(perf)
+                shutil.rmtree(temp_dir, ignore_errors=True)
                 return {"status": "failed", "title": title, "artist": artist, "duration": duration_sec}
-        perf.t_download_ms = t_dl.elapsed_ms
-        perf.filesize_kb = filesize_kb
-        perf.bitrate_kbps = 320
+            downloaded, filesize_kb = dl_result
 
-    if meta.get("resolved_album"):
-        album = meta["resolved_album"]
-    else:
-        album = resolve_album_name(meta.get("album"), itunes_meta.get("album"), title)
+        if meta.get("resolved_album"):
+            album = meta["resolved_album"]
+        else:
+            album = resolve_album_name(meta.get("album"), itunes_meta.get("album"), title)
 
-    if cover_url is None and itunes_meta.get("artwork_url"):
-        cover_url = itunes_meta["artwork_url"]
-    if cover_url is None:
-        cover_url = ""
+        if cover_url is None and itunes_meta.get("artwork_url"):
+            cover_url = itunes_meta["artwork_url"]
+        if cover_url is None:
+            cover_url = ""
 
-    spotify_year = meta.get("year")
-    confidence = itunes_meta.get("confidence", 0.0)
-    if confidence >= _CONFIDENCE_THRESHOLD:
-        genre = itunes_meta.get("genre", "")
-        year = spotify_year or itunes_meta.get("year", "")
-    else:
-        genre = meta.get("resolved_genre") or itunes_meta.get("genre", "")
-        year = spotify_year or meta.get("resolved_year") or itunes_meta.get("year", "")
+        spotify_year = meta.get("year")
+        confidence = itunes_meta.get("confidence", 0.0)
+        if confidence >= _CONFIDENCE_THRESHOLD:
+            genre = itunes_meta.get("genre", "")
+            year = spotify_year or itunes_meta.get("year", "")
+        else:
+            genre = meta.get("resolved_genre") or itunes_meta.get("genre", "")
+            year = spotify_year or meta.get("resolved_year") or itunes_meta.get("year", "")
 
-    album_dir = OUTPUT_BASE / sanitize(primary_artist(artist)) / sanitize(album)
-    album_dir.mkdir(parents=True, exist_ok=True)
-    out_stem = f"{track_num:02d} - {sanitize(artist)} - {sanitize(title)}"
-    final_path = album_dir / f"{out_stem}.mp3"
-    shutil.move(str(downloaded), str(final_path))
-    shutil.rmtree(temp_dir, ignore_errors=True)
+        album_dir = OUTPUT_BASE / sanitize(primary_artist(artist)) / sanitize(album)
+        album_dir.mkdir(parents=True, exist_ok=True)
+        out_stem = f"{track_num:02d} - {sanitize(artist)} - {sanitize(title)}"
+        final_path = album_dir / f"{out_stem}.mp3"
+        shutil.copy2(str(downloaded), str(final_path))
+        downloaded.unlink()
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
-    with Timer() as ttag:
-        tag_file(
-            final_path,
-            title=title,
-            artist=artist,
-            album=album,
-            track_number=track_num,
-            year=year,
-            genre=genre,
-            cover_url=cover_url,
-        )
-    perf.t_tag_ms = ttag.elapsed_ms
+        with Timer() as ttag:
+            tag_file(
+                final_path,
+                title=title,
+                artist=artist,
+                album=album,
+                track_number=track_num,
+                year=year,
+                genre=genre,
+                cover_url=cover_url,
+            )
+        perf.t_tag_ms = ttag.elapsed_ms
 
-    total_timer.__exit__(None, None, None)
     perf.t_total_ms = total_timer.elapsed_ms
     perf.t_spotify_ms = perf.t_spotify_ms or 0
     perf.status = "ok"
@@ -234,9 +222,15 @@ def _ytm_download(query: str, ydl_opts: dict) -> Path:
         info = ydl.extract_info(query, download=True)
         entry = info["entries"][0] if "entries" in info else info
         filename = ydl.prepare_filename(entry)
-        for ext in [".webm", ".m4a", ".opus", ".ogg", ".aac", ".wav", ".flac"]:
-            filename = filename.replace(ext, ".mp3")
-        return Path(filename)
+        path = Path(filename)
+        audio_exts = {".webm", ".m4a", ".opus", ".ogg", ".aac", ".wav", ".flac"}
+        if path.suffix in audio_exts:
+            return path.with_suffix(".mp3")
+        temp_dir = path.parent
+        mp3_files = sorted(temp_dir.glob("*.mp3"))
+        if mp3_files:
+            return mp3_files[0]
+        return path.with_suffix(".mp3")
 
 
 def handle_url(
@@ -318,7 +312,7 @@ def handle_url(
 
 
 def _parallel_process(tracks: list[dict], **kwargs) -> list[dict]:
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor
     from musiq.display import make_progress
 
     total = len(tracks)
@@ -399,10 +393,16 @@ def _fallback_url(url: str, *, dry_run: bool = False) -> list[dict]:
     return []
 
 
-def handle_search_selection(song_meta: dict) -> dict:
+def handle_search_selection(
+    song_meta: dict,
+    *,
+    no_itunes: bool = False,
+    dry_run: bool = False,
+    force: bool = False,
+) -> dict:
     MUSIQ_DIR.mkdir(parents=True, exist_ok=True)
     meta = {
-        "id": song_meta.get("id", ""),
+        "id": "",  # search uses iTunes IDs, not Spotify IDs — skip dedup
         "title": song_meta.get("title", ""),
         "artist": song_meta.get("artist", ""),
         "artists": song_meta.get("artists", [song_meta.get("artist", "")]),
@@ -411,4 +411,4 @@ def handle_search_selection(song_meta: dict) -> dict:
         "duration_ms": song_meta.get("duration_ms", 0),
         "cover_url": song_meta.get("cover_url", ""),
     }
-    return process_track(meta, no_itunes=False, dry_run=False, force=False)
+    return process_track(meta, no_itunes=no_itunes, dry_run=dry_run, force=force)

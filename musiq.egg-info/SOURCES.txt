@@ -9,6 +9,8 @@ musiq/itunes.py
 musiq/perf.py
 musiq/spotify.py
 musiq/tagger.py
+musiq/utils.py
+musiq/ytmusic.py
 musiq.egg-info/PKG-INFO
 musiq.egg-info/SOURCES.txt
 musiq.egg-info/dependency_links.txt

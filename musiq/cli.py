@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -8,7 +9,7 @@ from rich.table import Table
 from musiq.display import console, summary_table, stats_table
 from musiq.downloader import handle_url, handle_search_selection
 from musiq.history import get_all_downloads, clear_downloads, get_stats
-from musiq.spotify import search_spotify
+from musiq.spotify import search_itunes
 
 
 @click.group()
@@ -48,16 +49,19 @@ def download(url: str, no_itunes: bool, dry_run: bool, force: bool, workers: int
 
 @cli.command()
 @click.argument("query", nargs=-1, required=True)
-def search(query: tuple[str, ...]):
-    """Search Spotify and download your selection."""
+@click.option("--no-itunes", is_flag=True, help="Skip iTunes metadata lookup")
+@click.option("--dry-run", is_flag=True, help="Show what would download without fetching")
+@click.option("--force", is_flag=True, help="Re-download even if already in history")
+def search(query: tuple[str, ...], no_itunes: bool, dry_run: bool, force: bool):
+    """Search and download your selection."""
     q = " ".join(query)
     console.print(f"[bold]Searching for:[/bold] {q}")
 
     try:
-        results = search_spotify(q)
+        results = search_itunes(q)
     except Exception as exc:
         console.print(f"[red]Search failed: {exc}[/red]")
-        console.print("[yellow]Tip: Spotify's public search API may be rate-limited. Try again later.[/yellow]")
+        console.print("[yellow]Tip: iTunes Search API may be rate-limited. Try again later.[/yellow]")
         return
 
     if not results:
@@ -82,11 +86,13 @@ def search(query: tuple[str, ...]):
     selected = results[choice - 1]
     console.print(f"\n[bold]Downloading:[/bold] {selected.get('title', '?')} — {selected.get('artist', '?')}")
 
-    result = handle_search_selection(selected)
+    result = handle_search_selection(selected, no_itunes=no_itunes, dry_run=dry_run, force=force)
     if result.get("status") == "downloaded":
         console.print(f"[green]✓ Downloaded {selected.get('title')}[/green]")
     elif result.get("status") == "skipped":
         console.print("[yellow]⚠ Already in history[/yellow]")
+    elif result.get("status") == "dry-run":
+        console.print(f"[cyan]Would download: {selected.get('title')}[/cyan]")
     else:
         console.print(f"[red]✖ Failed: {selected.get('title')}[/red]")
 
@@ -146,7 +152,28 @@ def update():
     if r.returncode != 0:
         console.print(f"[red]✖ git pull failed:\n{r.stderr}[/red]")
         return
+    if "CONFLICT" in r.stdout or "CONFLICT" in r.stderr:
+        console.print("[red]✖ Merge conflicts detected. Resolve them manually, then run update again.[/red]")
+        return
     console.print(r.stdout)
+
+    pipx_path = shutil.which("pipx")
+    if pipx_path:
+        name = "musiq"
+        r = subprocess.run(
+            [pipx_path, "ensurepath", "--quiet"], capture_output=True,
+        )
+        r = subprocess.run(
+            [pipx_path, "upgrade", name],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            console.print(r.stdout)
+            console.print("[green]✓ Update complete (pipx)[/green]")
+            return
+        if "not installed" not in r.stderr.lower():
+            console.print(f"[red]✖ pipx upgrade failed:\n{r.stderr}[/red]")
+            return
 
     console.print("[bold]Reinstalling dependencies...[/bold]")
     r = subprocess.run(

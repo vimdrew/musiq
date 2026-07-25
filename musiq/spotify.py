@@ -1,5 +1,8 @@
 import json
+import os
 import re
+import time
+from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
@@ -14,6 +17,199 @@ HEADERS = {
 
 class SpotifyError(Exception):
     pass
+
+
+_CONFIG_PATH = Path.home() / ".musiq" / "config"
+
+
+def _load_env_fallback() -> tuple[str | None, str | None]:
+    client_id = os.environ.get("SPOTIFY_CLIENT_ID")
+    client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET")
+    if client_id and client_secret:
+        return client_id, client_secret
+    cfg = _CONFIG_PATH
+    if cfg.is_file():
+        try:
+            for line in cfg.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("SPOTIFY_CLIENT_ID="):
+                    client_id = line.split("=", 1)[1]
+                elif line.startswith("SPOTIFY_CLIENT_SECRET="):
+                    client_secret = line.split("=", 1)[1]
+        except OSError:
+            pass
+    return client_id, client_secret
+
+
+class SpotifyClient:
+    def __init__(self):
+        self._token = None
+        self._token_expires_at = 0.0
+        self._client_id, self._client_secret = _load_env_fallback()
+
+    @property
+    def configured(self) -> bool:
+        return bool(self._client_id and self._client_secret)
+
+    def _ensure_token(self) -> None:
+        if time.time() < self._token_expires_at:
+            return
+        resp = requests.post(
+            "https://accounts.spotify.com/api/token",
+            data={"grant_type": "client_credentials"},
+            auth=(self._client_id, self._client_secret),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        self._token = data["access_token"]
+        self._token_expires_at = time.time() + data["expires_in"] - 60
+
+    def _headers(self) -> dict:
+        self._ensure_token()
+        return {"Authorization": f"Bearer {self._token}"}
+
+    def get_track(self, track_id: str) -> dict | None:
+        if not self.configured:
+            return None
+        try:
+            resp = requests.get(
+                f"https://api.spotify.com/v1/tracks/{track_id}",
+                headers=self._headers(),
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return None
+
+    def get_album(self, album_id: str) -> dict | None:
+        if not self.configured:
+            return None
+        try:
+            resp = requests.get(
+                f"https://api.spotify.com/v1/albums/{album_id}",
+                headers=self._headers(),
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return None
+
+    def get_playlist(self, playlist_id: str) -> dict | None:
+        if not self.configured:
+            return None
+        try:
+            resp = requests.get(
+                f"https://api.spotify.com/v1/playlists/{playlist_id}",
+                headers=self._headers(),
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return None
+
+
+_spotify_client = SpotifyClient()
+
+
+def _best_image(images: list) -> str:
+    if not images:
+        return ""
+    best = max(images, key=lambda x: (x.get("width", 0) or 0) * (x.get("height", 0) or 0))
+    return best.get("url", "")
+
+
+def _extract_year(release_date: str) -> str:
+    if release_date and len(release_date) >= 4:
+        return release_date[:4]
+    return ""
+
+
+# ── API response mappers ──────────────────────────────────────────
+
+def _api_to_track_dict(data: dict, track_id: str) -> dict:
+    artists = [a["name"] for a in data.get("artists", []) if isinstance(a, dict)]
+    album = data.get("album") or {}
+    release_date = (album.get("release_date") or "") if isinstance(album, dict) else ""
+    images = (album.get("images") or []) if isinstance(album, dict) else []
+    external_ids = data.get("external_ids") or {}
+    return {
+        "id": track_id,
+        "title": data.get("name", ""),
+        "artist": ", ".join(artists) if artists else "",
+        "artists": artists,
+        "album": album.get("name") if isinstance(album, dict) else None,
+        "track_number": data.get("track_number"),
+        "duration_ms": data.get("duration_ms", 0) or 0,
+        "release_date": release_date,
+        "cover_url": _best_image(images),
+        "year": _extract_year(release_date),
+        "explicit": data.get("explicit", False),
+        "isrc": (external_ids.get("isrc") or "") if isinstance(external_ids, dict) else "",
+    }
+
+
+def _api_album_to_tracks(data: dict) -> list[dict] | None:
+    album_name = data.get("name", "")
+    release_date = data.get("release_date", "")
+    year = _extract_year(release_date)
+    cover_url = _best_image(data.get("images", []))
+    tracks_container = data.get("tracks") or {}
+    items = tracks_container.get("items", []) if isinstance(tracks_container, dict) else []
+    results = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        track_artists = [a["name"] for a in item.get("artists", []) if isinstance(a, dict)]
+        results.append({
+            "id": item.get("id", ""),
+            "title": item.get("name", ""),
+            "artist": ", ".join(track_artists) if track_artists else "",
+            "artists": track_artists,
+            "album": album_name,
+            "track_number": item.get("track_number", 0) or 0,
+            "duration_ms": item.get("duration_ms", 0) or 0,
+            "cover_url": cover_url,
+            "year": year,
+            "release_date": release_date,
+            "explicit": item.get("explicit", False),
+        })
+    return results if results else None
+
+
+def _api_playlist_to_tracks(data: dict) -> list[dict] | None:
+    tracks_container = data.get("tracks") or {}
+    items = tracks_container.get("items", []) if isinstance(tracks_container, dict) else []
+    results = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        track = entry.get("track")
+        if not track or not isinstance(track, dict):
+            continue
+        track_artists = [a["name"] for a in track.get("artists", []) if isinstance(a, dict)]
+        album_info = track.get("album") or {}
+        release_date = (album_info.get("release_date") or "") if isinstance(album_info, dict) else ""
+        year = _extract_year(release_date)
+        images = (album_info.get("images") or []) if isinstance(album_info, dict) else []
+        cover_url = _best_image(images)
+        results.append({
+            "id": track.get("id", ""),
+            "title": track.get("name", ""),
+            "artist": ", ".join(track_artists) if track_artists else "",
+            "artists": track_artists,
+            "album": album_info.get("name") if isinstance(album_info, dict) else "",
+            "track_number": track.get("track_number", 0) or 0,
+            "duration_ms": track.get("duration_ms", 0) or 0,
+            "cover_url": cover_url,
+            "year": year,
+            "release_date": release_date,
+            "explicit": track.get("explicit", False),
+        })
+    return results if results else None
 
 
 # ── ID / type extraction ──────────────────────────────────────────
@@ -46,6 +242,11 @@ def fetch_next_data(kind: str, spotify_id: str) -> dict:
 
 def resolve_track(url: str) -> dict | None:
     kind, sid = extract_id_and_type(url)
+    api_data = _spotify_client.get_track(sid)
+    if api_data is not None:
+        console.print("[dim][spotify] using API[/dim]")
+        return _api_to_track_dict(api_data, sid)
+    console.print("[dim][spotify] using scraper[/dim]")
     try:
         data = fetch_next_data(kind, sid)
         entity = _navigate_entity(data)
@@ -74,7 +275,9 @@ def _enrich_with_og(result: dict, sid: str) -> None:
                 if len(parts) >= 2 and not result.get("album"):
                     result["album"] = parts[1]
                 if len(parts) >= 4 and not result.get("year"):
-                    result["year"] = parts[3]
+                    year_raw = parts[3]
+                    if year_raw.isdigit() and len(year_raw) == 4:
+                        result["year"] = year_raw
     except Exception:
         pass
 
@@ -180,11 +383,21 @@ def _navigate_entity(data: dict) -> dict | None:
 
 def resolve_album(url: str) -> list[dict] | None:
     _, sid = extract_id_and_type(url)
+    api_data = _spotify_client.get_album(sid)
+    if api_data is not None:
+        console.print("[dim][spotify] using API[/dim]")
+        return _api_album_to_tracks(api_data)
+    console.print("[dim][spotify] using scraper[/dim]")
     return _resolve_collection_from_embed("album", sid)
 
 
 def resolve_playlist(url: str) -> list[dict] | None:
     _, sid = extract_id_and_type(url)
+    api_data = _spotify_client.get_playlist(sid)
+    if api_data is not None:
+        console.print("[dim][spotify] using API[/dim]")
+        return _api_playlist_to_tracks(api_data)
+    console.print("[dim][spotify] using scraper[/dim]")
     return _resolve_collection_from_embed("playlist", sid)
 
 
@@ -223,7 +436,7 @@ def _resolve_collection_from_embed(kind: str, sid: str) -> list[dict] | None:
 
 # ── Search (via iTunes) ───────────────────────────────────────────
 
-def search_spotify(query: str) -> list[dict]:
+def search_itunes(query: str) -> list[dict]:
     try:
         resp = requests.get(
             "https://itunes.apple.com/search",

@@ -110,6 +110,9 @@ def clear_downloads():
 
 def get_stats():
     conn = get_conn()
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_perf_log_t_total ON perf_log(t_total_ms)"
+    )
     cur = conn.execute("""
         SELECT
             COUNT(*) FILTER (WHERE status = 'ok') AS ok_count,
@@ -141,11 +144,9 @@ def get_stats():
         FROM perf_log
     """)
     row = cur.fetchone()
-    conn.close()
 
     slowest_title = ""
     fastest_title = ""
-    conn = get_conn()
     cur = conn.execute(
         "SELECT title, t_total_ms FROM perf_log WHERE status = 'ok' "
         "ORDER BY t_total_ms DESC LIMIT 1"

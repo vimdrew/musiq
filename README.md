@@ -72,7 +72,7 @@ musiq stats
 3. **Search** YouTube Music via `ytmusicapi` for best matching song → video ID
 4. **Download** video via yt-dlp → FFmpeg → MP3 320 kbps
 5. **Tag** with eyeD3: title, artist, album, track#, year, genre + cover art
-6. **Save** to `~/Downloads/Music/<Artist>/<Album>/<NN - Artist - Title.mp3>`
+6. **Save** to `~/Music/<Artist>/<Album>/<NN - Artist - Title.mp3>`
 7. **Record** in SQLite history + performance log
 
 ### Fallback chain
@@ -89,7 +89,7 @@ fragility of API-free scraping.
 ## Output
 
 ```
-~/Downloads/Music/
+~/Music/
   Daft Punk/
     Discovery/
       01 - Daft Punk - One More Time.mp3

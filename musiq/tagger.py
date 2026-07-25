@@ -1,4 +1,3 @@
-import io
 from pathlib import Path
 
 import eyed3
@@ -32,8 +31,6 @@ def tag_file(
 ) -> None:
     try:
         audio = eyed3.load(str(filepath))
-        if audio is None:
-            audio = eyed3.load(str(filepath))
         if audio is None:
             console.print(f"[yellow]⚠ Could not load {filepath} for tagging[/yellow]")
             return

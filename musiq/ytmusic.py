@@ -1,31 +1,31 @@
-from difflib import SequenceMatcher
-
 from ytmusicapi import YTMusic
 
 from musiq.display import console
+from musiq.utils import artist_match
 
 _yt = YTMusic()
 
+_CONFIDENCE_THRESHOLD = 0.4
 
-def artist_match(expected: str, returned: str) -> float:
+
+def _any_artist_match(expected: str, artists: list[dict]) -> bool:
     expected = expected.lower().strip()
-    returned = returned.lower().strip()
-    if expected == returned:
-        return 1.0
-    if expected in returned or returned in expected:
-        return 0.9
-    return SequenceMatcher(None, expected, returned).ratio()
+    for a in artists:
+        name = a.get("name", "").lower().strip()
+        if name and (expected == name or expected in name or name in expected):
+            return True
+    return False
 
 
 def _score_result(result: dict, title: str, artist: str) -> int:
     score = 0
     result_title = result.get("title", "").lower()
-    result_artist = result.get("artists", [{}])[0].get("name", "").lower()
+    artists = result.get("artists", [])
 
     if result_title == title.lower():
         score += 10
 
-    if result_artist == artist.lower():
+    if _any_artist_match(artist, artists):
         score += 5
 
     if result_title in title.lower() or title.lower() in result_title:
@@ -56,8 +56,10 @@ def search_song(title: str, artist: str) -> dict | None:
 
     best = max(results, key=lambda r: _score_result(r, title, artist))
 
-    confidence = artist_match(artist, best.get("artists", [{}])[0].get("name", ""))
-    if confidence < 0.6:
+    artists = best.get("artists", [])
+    top_artist_name = artists[0].get("name", "") if artists else ""
+    confidence = artist_match(artist, top_artist_name)
+    if confidence < _CONFIDENCE_THRESHOLD:
         return None
 
     return {

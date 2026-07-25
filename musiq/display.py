@@ -6,7 +6,6 @@ from rich.progress import (
     TextColumn,
     BarColumn,
     TimeElapsedColumn,
-    TaskID,
 )
 from rich import box
 from rich.text import Text

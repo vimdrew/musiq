@@ -4,6 +4,7 @@ Version: 0.2.0
 Summary: Download music from Spotify to MP3 — pure yt-dlp + eyeD3 + iTunes API
 Requires-Python: >=3.10
 Requires-Dist: yt-dlp>=2026
+Requires-Dist: ytmusicapi>=1.12
 Requires-Dist: eyed3>=0.9
 Requires-Dist: requests>=2
 Requires-Dist: beautifulsoup4>=4
