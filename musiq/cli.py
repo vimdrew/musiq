@@ -194,6 +194,13 @@ def fix(filepath: Path, url: str):
 
     console.print(f"[green]✓ Fixed:[/green] {filepath}")
 
+    verify = read_id3_tags(filepath)
+    if verify:
+        v_title = verify.get("title", "?")
+        v_artist = verify.get("artist", "?")
+        v_album = verify.get("album", "?")
+        console.print(f"  [dim]Verified tags — {v_title} / {v_artist} / {v_album}[/dim]")
+
 
 def _project_root() -> Path | None:
     pkg_dir = Path(__file__).resolve().parent

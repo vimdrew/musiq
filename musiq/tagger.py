@@ -100,14 +100,24 @@ def read_id3_tags(filepath: Path) -> dict:
 
 
 def rewrite_id3_tags(filepath: Path, tags: dict) -> None:
-    """Reapply a previously-read set of ID3 tags to an MP3 file."""
+    """Reapply a previously-read set of ID3 tags to an MP3 file.
+
+    Nukes the entire existing tag first so nothing from a prior
+    embed (e.g. yt-dlp metadata) survives, then writes only the
+    fields from *tags*.
+    """
     try:
         audio = eyed3.load(str(filepath))
         if audio is None:
             console.print(f"[yellow]⚠ Could not load {filepath} for tagging[/yellow]")
             return
+
+        # Wipe the tag completely — drop every frame so leftover
+        # metadata from yt-dlp (or anything else) cannot linger.
         if audio.tag is None:
             audio.initTag()
+        if audio.tag.frame_set:
+            audio.tag.frame_set.clear()
 
         audio.tag.title = tags.get("title", "")
         audio.tag.artist = tags.get("artist", "")
@@ -125,8 +135,6 @@ def rewrite_id3_tags(filepath: Path, tags: dict) -> None:
             except Exception:
                 pass
 
-        for img in list(audio.tag.images):
-            audio.tag.images.remove(img.description)
         for img in tags.get("images", []):
             audio.tag.images.set(
                 img["picture_type"],
