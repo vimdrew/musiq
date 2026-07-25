@@ -1,15 +1,17 @@
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import click
 from rich.table import Table
 
 from musiq.display import console, summary_table, stats_table
-from musiq.downloader import handle_url, handle_search_selection
+from musiq.downloader import handle_url, handle_search_selection, _ytm_download
 from musiq.history import get_all_downloads, clear_downloads, get_stats
 from musiq.spotify import search_itunes
+from musiq.tagger import read_id3_tags, rewrite_id3_tags
 
 
 @click.group()
@@ -129,6 +131,68 @@ def stats():
         console.print("[yellow]No performance data yet. Download some tracks first.[/yellow]")
         return
     console.print(stats_table(s))
+
+
+@cli.command("fix")
+@click.argument("filepath", type=click.Path(exists=True, path_type=Path))
+@click.argument("url")
+def fix(filepath: Path, url: str):
+    """Replace an MP3's audio with a fresh download from a YouTube URL, keeping its tags."""
+    if filepath.suffix.lower() != ".mp3":
+        console.print(f"[red]✖ Not an MP3 file: {filepath}[/red]")
+        raise SystemExit(1)
+
+    console.print(f"[bold]Reading tags from:[/bold] {filepath}")
+    tags = read_id3_tags(filepath)
+    if not tags:
+        console.print(f"[red]✖ No ID3 tags found in {filepath}[/red]")
+        raise SystemExit(1)
+
+    title = tags.get("title") or filepath.stem
+    artist = tags.get("artist") or "Unknown Artist"
+    console.print(f"  [dim]{title} — {artist}[/dim]")
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="musiq_fix_"))
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "320",
+            }
+        ],
+        "quiet": True,
+        "no_warnings": True,
+    }
+
+    console.print(f"[bold]Downloading from:[/bold] {url}")
+    try:
+        downloaded = _ytm_download(url, ydl_opts)
+    except Exception as exc:
+        console.print(f"[red]✖ Download failed: {exc}[/red]")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise SystemExit(1)
+
+    try:
+        shutil.copy2(str(downloaded), str(filepath))
+    except Exception as exc:
+        console.print(f"[red]✖ Failed to replace file: {exc}[/red]")
+        downloaded.unlink(missing_ok=True)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise SystemExit(1)
+    finally:
+        downloaded.unlink(missing_ok=True)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    try:
+        rewrite_id3_tags(filepath, tags)
+    except Exception as exc:
+        console.print(f"[red]✖ Failed to rewrite tags: {exc}[/red]")
+        raise SystemExit(1)
+
+    console.print(f"[green]✓ Fixed:[/green] {filepath}")
 
 
 def _project_root() -> Path | None:

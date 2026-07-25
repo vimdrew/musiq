@@ -60,3 +60,81 @@ def tag_file(
         audio.tag.save(encoding="utf-8")
     except Exception as exc:
         console.print(f"[yellow]⚠ Tagging warning: {exc}[/yellow]")
+
+
+def read_id3_tags(filepath: Path) -> dict:
+    """Read all ID3 tags from an MP3 file and return them as a dict."""
+    audio = eyed3.load(str(filepath))
+    if audio is None or audio.tag is None:
+        return {}
+
+    tag = audio.tag
+    tags: dict = {
+        "title": tag.title or "",
+        "artist": tag.artist or "",
+        "album": tag.album or "",
+        "track_num": tag.track_num[0] if tag.track_num and tag.track_num[0] else 0,
+        "disc_num": tag.disc_num[0] if tag.disc_num and tag.disc_num[0] else 0,
+        "genre": tag.genre.name if tag.genre else "",
+        "year": "",
+        "images": [],
+    }
+
+    if tag.recording_date:
+        tags["year"] = str(tag.recording_date.year)
+
+    for img in tag.images:
+        tags["images"].append({
+            "description": img.description or "",
+            "image_data": img.image_data,
+            "mime_type": img.mime_type or "image/jpeg",
+            "picture_type": img.picture_type,
+        })
+
+    if hasattr(tag, "frame_set") and tag.frame_set:
+        for frame_id, frames in tag.frame_set.items():
+            if frame_id not in ("TIT2", "TPE1", "TALB", "TRCK", "TPOS", "TCON", "TDRC", "APIC"):
+                tags.setdefault("other_frames", []).append(frame_id)
+
+    return tags
+
+
+def rewrite_id3_tags(filepath: Path, tags: dict) -> None:
+    """Reapply a previously-read set of ID3 tags to an MP3 file."""
+    try:
+        audio = eyed3.load(str(filepath))
+        if audio is None:
+            console.print(f"[yellow]⚠ Could not load {filepath} for tagging[/yellow]")
+            return
+        if audio.tag is None:
+            audio.initTag()
+
+        audio.tag.title = tags.get("title", "")
+        audio.tag.artist = tags.get("artist", "")
+        audio.tag.album = tags.get("album", "")
+        audio.tag.track_num = tags.get("track_num", 0)
+        disc_num = tags.get("disc_num", 0)
+        if disc_num:
+            audio.tag.disc_num = disc_num
+        genre = tags.get("genre", "")
+        audio.tag.genre = genre if genre else None
+        year = tags.get("year", "")
+        if year:
+            try:
+                audio.tag.recording_date = eyed3.core.Date(int(year))
+            except Exception:
+                pass
+
+        audio.tag.images.clear()
+        for img in tags.get("images", []):
+            audio.tag.images.set(
+                img["picture_type"],
+                img["image_data"],
+                img["mime_type"],
+                description=img.get("description", ""),
+            )
+
+        audio.tag.save(encoding="utf-8")
+    except Exception as exc:
+        console.print(f"[yellow]⚠ Tag rewrite warning: {exc}[/yellow]")
+        raise
