@@ -125,7 +125,8 @@ def rewrite_id3_tags(filepath: Path, tags: dict) -> None:
             except Exception:
                 pass
 
-        audio.tag.images.clear()
+        for img in list(audio.tag.images):
+            audio.tag.images.remove(img.description)
         for img in tags.get("images", []):
             audio.tag.images.set(
                 img["picture_type"],
