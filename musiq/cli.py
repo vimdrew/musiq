@@ -134,46 +134,41 @@ def stats():
     console.print(stats_table(s))
 
 
-@cli.command("fix")
-@click.argument("query", nargs=-1, required=True)
-def fix(query: tuple[str, ...]):
-    """Find a track in the local library and re-download its audio from a YouTube URL."""
-    q = " ".join(query)
-    console.print(f"[bold]Searching library for:[/bold] {q}")
+def _normalize(s: str) -> str:
+    """Lowercase and strip punctuation so 'im upset' matches "I'm Upset"."""
+    out = []
+    for ch in s.lower():
+        if ch.isalnum() or ch in " -":
+            out.append(ch)
+        elif ch == ".":
+            out.append(" ")
+    return "".join(out)
 
-    music_dir = Path.home() / "Music"
-    if not music_dir.is_dir():
-        console.print(f"[red]✖ Music library not found: {music_dir}[/red]")
-        raise SystemExit(1)
+
+def _track_parts(music_dir: Path, path: Path) -> tuple[str, str, str]:
+    """Return the (artist, album, song) an mp3 under music_dir represents."""
+    rel = path.relative_to(music_dir).parts
+    artist = rel[0] if len(rel) > 1 else ""
+    album = rel[1] if len(rel) > 2 else ""
+    return artist, album, path.stem
+
+
+def _find_tracks(music_dir: Path, query: str) -> list[Path]:
+    """Find library .mp3 files matching a query: substring first, then fuzzy."""
+    files = sorted(p for p in music_dir.rglob("*.mp3") if p.is_file())
 
     def rel_str(p: Path) -> str:
         return str(p.relative_to(music_dir).with_suffix(""))
 
-    def track_parts(p: Path) -> tuple[str, str, str]:
-        rel = p.relative_to(music_dir).parts
-        artist = rel[0] if len(rel) > 1 else ""
-        album = rel[1] if len(rel) > 2 else ""
-        return artist, album, p.stem
-
-    def normalize(s: str) -> str:
-        out = []
-        for ch in s.lower():
-            if ch.isalnum() or ch in " -":
-                out.append(ch)
-            elif ch == ".":
-                out.append(" ")
-        return "".join(out)
-
-    files = sorted(p for p in music_dir.rglob("*.mp3") if p.is_file())
-    needle = normalize(q)
-    hits = [p for p in files if needle in normalize(rel_str(p))]
+    needle = _normalize(query)
+    hits = [p for p in files if needle in _normalize(rel_str(p))]
     if not hits:
-        parts = {p: track_parts(p) for p in files}
+        parts = {p: _track_parts(music_dir, p) for p in files}
         candidates = set()
         for idx in range(3):
             by_component = {}
             for p, (a, b, c) in parts.items():
-                comp = normalize((a, b, c)[idx])
+                comp = _normalize((a, b, c)[idx])
                 if comp and comp not in by_component:
                     by_component[comp] = p
             for m in difflib.get_close_matches(needle, list(by_component), n=len(by_component), cutoff=0.6):
@@ -181,16 +176,23 @@ def fix(query: tuple[str, ...]):
 
         def best_score(p: Path) -> float:
             return max(
-                difflib.SequenceMatcher(None, needle, normalize(comp)).ratio()
+                difflib.SequenceMatcher(None, needle, _normalize(comp)).ratio()
                 for comp in parts[p]
                 if comp
             )
 
         hits = sorted(candidates, key=lambda p: (-best_score(p), rel_str(p)))
 
+    return hits
+
+
+def _select_track(music_dir: Path, query: str) -> Path | None:
+    """Find the track for a query; single hits skip straight to the caller."""
+    console.print(f"[bold]Searching library for:[/bold] {query}")
+    hits = _find_tracks(music_dir, query)
     if not hits:
         console.print("[red]No matching tracks found in ~/Music[/red]")
-        return
+        return None
 
     if len(hits) > 1:
         table = Table(box=None)
@@ -199,18 +201,39 @@ def fix(query: tuple[str, ...]):
         table.add_column("Album", style="white")
         table.add_column("Song", style="cyan")
         for i, p in enumerate(hits[:10], 1):
-            artist, album, song = track_parts(p)
+            artist, album, song = _track_parts(music_dir, p)
             table.add_row(str(i), artist, album, song)
         console.print(table)
 
         choice = click.prompt(
-            "Select a track to fix",
+            "Select a track",
             type=click.IntRange(1, min(len(hits), 10)),
         )
-        filepath = hits[choice - 1]
-    else:
-        filepath = hits[0]
-    artist, album, song = track_parts(filepath)
+        return hits[choice - 1]
+
+    return hits[0]
+
+
+def _music_dir() -> Path:
+    music_dir = Path.home() / "Music"
+    if not music_dir.is_dir():
+        console.print(f"[red]✖ Music library not found: {music_dir}[/red]")
+        raise SystemExit(1)
+    return music_dir
+
+
+@cli.command("fix")
+@click.argument("query", nargs=-1, required=True)
+def fix(query: tuple[str, ...]):
+    """Find a track in the local library and re-download its audio from a YouTube URL."""
+    q = " ".join(query)
+    music_dir = _music_dir()
+
+    filepath = _select_track(music_dir, q)
+    if filepath is None:
+        return
+
+    artist, album, song = _track_parts(music_dir, filepath)
     if not click.confirm(f'Fix "{song}" — {artist}?', default=True):
         console.print("[yellow]Cancelled[/yellow]")
         return
@@ -280,6 +303,62 @@ def fix(query: tuple[str, ...]):
         v_artist = verify.get("artist", "?")
         v_album = verify.get("album", "?")
         console.print(f"  [dim]Verified tags — {v_title} / {v_artist} / {v_album}[/dim]")
+
+
+@cli.command("edit")
+@click.argument("query", nargs=-1, required=True)
+def edit(query: tuple[str, ...]):
+    """Edit a track's ID3 tags interactively."""
+    q = " ".join(query)
+    music_dir = _music_dir()
+
+    filepath = _select_track(music_dir, q)
+    if filepath is None:
+        return
+
+    artist, album, song = _track_parts(music_dir, filepath)
+    if not click.confirm(f'Edit "{song}" — {artist}?', default=True):
+        console.print("[yellow]Cancelled[/yellow]")
+        return
+
+    tags = read_id3_tags(filepath)
+    if not tags:
+        console.print(f"[red]✖ No ID3 tags found in {filepath}[/red]")
+        raise SystemExit(1)
+
+    console.print(f"[bold]Editing tags for:[/bold] {filepath}")
+    console.print(f"  [dim]{tags.get('title') or song} — {tags.get('artist') or artist}[/dim]")
+
+    tags["title"] = click.prompt("Title", default=tags.get("title") or "", type=str)
+    tags["artist"] = click.prompt("Artist", default=tags.get("artist") or "", type=str)
+    tags["album"] = click.prompt("Album", default=tags.get("album") or "", type=str)
+    tags["track_num"] = click.prompt("Track number", default=tags.get("track_num") or 0, type=int)
+    tags["disc_num"] = click.prompt("Disc number", default=tags.get("disc_num") or 0, type=int)
+    tags["genre"] = click.prompt("Genre", default=tags.get("genre") or "", type=str)
+
+    while True:
+        year_raw = click.prompt("Year", default=tags.get("year") or "", type=str).strip()
+        if not year_raw:
+            break
+        if year_raw.isdigit():
+            tags["year"] = str(int(year_raw))
+            break
+        console.print("[yellow]⚠ Invalid year — enter a number or press Enter to skip[/yellow]")
+
+    rewrite_id3_tags(filepath, tags)
+
+    console.print(f"[green]✓ Saved:[/green] {filepath}")
+    console.print(
+        f"  [dim]Title:[/dim] {tags['title'] or '—'}  "
+        f"[dim]Artist:[/dim] {tags['artist'] or '—'}  "
+        f"[dim]Album:[/dim] {tags['album'] or '—'}"
+    )
+    console.print(
+        f"  [dim]Track:[/dim] {tags['track_num'] or '—'}  "
+        f"[dim]Disc:[/dim] {tags['disc_num'] or '—'}  "
+        f"[dim]Genre:[/dim] {tags['genre'] or '—'}  "
+        f"[dim]Year:[/dim] {tags['year'] or '—'}"
+    )
 
 
 def _project_root() -> Path | None:
