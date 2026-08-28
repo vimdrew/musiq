@@ -1,3 +1,4 @@
+import difflib
 import shutil
 import subprocess
 import sys
@@ -134,10 +135,77 @@ def stats():
 
 
 @cli.command("fix")
-@click.argument("filepath", type=click.Path(exists=True, path_type=Path))
-@click.argument("url")
-def fix(filepath: Path, url: str):
-    """Replace an MP3's audio with a fresh download from a YouTube URL, keeping its tags."""
+@click.argument("query", nargs=-1, required=True)
+def fix(query: tuple[str, ...]):
+    """Find a track in the local library and re-download its audio from a YouTube URL."""
+    q = " ".join(query)
+    console.print(f"[bold]Searching library for:[/bold] {q}")
+
+    music_dir = Path.home() / "Music"
+    if not music_dir.is_dir():
+        console.print(f"[red]✖ Music library not found: {music_dir}[/red]")
+        raise SystemExit(1)
+
+    def rel_str(p: Path) -> str:
+        return str(p.relative_to(music_dir).with_suffix(""))
+
+    def track_parts(p: Path) -> tuple[str, str, str]:
+        rel = p.relative_to(music_dir).parts
+        artist = rel[0] if len(rel) > 1 else ""
+        album = rel[1] if len(rel) > 2 else ""
+        return artist, album, p.stem
+
+    files = sorted(p for p in music_dir.rglob("*.mp3") if p.is_file())
+    needle = q.lower()
+    hits = [p for p in files if needle in rel_str(p).lower()]
+    if not hits:
+        parts = {p: track_parts(p) for p in files}
+        candidates = set()
+        for idx in range(3):
+            by_component = {}
+            for p, (a, b, c) in parts.items():
+                comp = (a, b, c)[idx].lower()
+                if comp and comp not in by_component:
+                    by_component[comp] = p
+            for m in difflib.get_close_matches(needle, list(by_component), n=10, cutoff=0.45):
+                candidates.add(by_component[m])
+
+        def best_score(p: Path) -> float:
+            return max(
+                difflib.SequenceMatcher(None, needle, comp.lower()).ratio()
+                for comp in parts[p]
+                if comp
+            )
+
+        hits = sorted(candidates, key=lambda p: (-best_score(p), rel_str(p)))
+
+    if not hits:
+        console.print("[red]No matching tracks found in ~/Music[/red]")
+        return
+
+    table = Table(box=None)
+    table.add_column("#", style="dim")
+    table.add_column("Artist", style="magenta")
+    table.add_column("Album", style="white")
+    table.add_column("Song", style="cyan")
+    for i, p in enumerate(hits[:10], 1):
+        artist, album, song = track_parts(p)
+        table.add_row(str(i), artist, album, song)
+    console.print(table)
+
+    choice = click.prompt(
+        "Select a track to fix",
+        type=click.IntRange(1, min(len(hits), 10)),
+    )
+    filepath = hits[choice - 1]
+    artist, album, song = track_parts(filepath)
+    if not click.confirm(f'Fix "{song}" — {artist}?', default=True):
+        console.print("[yellow]Cancelled[/yellow]")
+        return
+
+    url = click.prompt("YouTube URL")
+    console.print(f"[bold]Replacing audio for:[/bold] {filepath}")
+
     if filepath.suffix.lower() != ".mp3":
         console.print(f"[red]✖ Not an MP3 file: {filepath}[/red]")
         raise SystemExit(1)
