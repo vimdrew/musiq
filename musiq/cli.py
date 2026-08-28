@@ -155,16 +155,25 @@ def fix(query: tuple[str, ...]):
         album = rel[1] if len(rel) > 2 else ""
         return artist, album, p.stem
 
+    def normalize(s: str) -> str:
+        out = []
+        for ch in s.lower():
+            if ch.isalnum() or ch in " -":
+                out.append(ch)
+            elif ch == ".":
+                out.append(" ")
+        return "".join(out)
+
     files = sorted(p for p in music_dir.rglob("*.mp3") if p.is_file())
-    needle = q.lower()
-    hits = [p for p in files if needle in rel_str(p).lower()]
+    needle = normalize(q)
+    hits = [p for p in files if needle in normalize(rel_str(p))]
     if not hits:
         parts = {p: track_parts(p) for p in files}
         candidates = set()
         for idx in range(3):
             by_component = {}
             for p, (a, b, c) in parts.items():
-                comp = (a, b, c)[idx].lower()
+                comp = normalize((a, b, c)[idx])
                 if comp and comp not in by_component:
                     by_component[comp] = p
             for m in difflib.get_close_matches(needle, list(by_component), n=len(by_component), cutoff=0.6):
@@ -172,7 +181,7 @@ def fix(query: tuple[str, ...]):
 
         def best_score(p: Path) -> float:
             return max(
-                difflib.SequenceMatcher(None, needle, comp.lower()).ratio()
+                difflib.SequenceMatcher(None, needle, normalize(comp)).ratio()
                 for comp in parts[p]
                 if comp
             )
@@ -183,21 +192,24 @@ def fix(query: tuple[str, ...]):
         console.print("[red]No matching tracks found in ~/Music[/red]")
         return
 
-    table = Table(box=None)
-    table.add_column("#", style="dim")
-    table.add_column("Artist", style="magenta")
-    table.add_column("Album", style="white")
-    table.add_column("Song", style="cyan")
-    for i, p in enumerate(hits[:10], 1):
-        artist, album, song = track_parts(p)
-        table.add_row(str(i), artist, album, song)
-    console.print(table)
+    if len(hits) > 1:
+        table = Table(box=None)
+        table.add_column("#", style="dim")
+        table.add_column("Artist", style="magenta")
+        table.add_column("Album", style="white")
+        table.add_column("Song", style="cyan")
+        for i, p in enumerate(hits[:10], 1):
+            artist, album, song = track_parts(p)
+            table.add_row(str(i), artist, album, song)
+        console.print(table)
 
-    choice = click.prompt(
-        "Select a track to fix",
-        type=click.IntRange(1, min(len(hits), 10)),
-    )
-    filepath = hits[choice - 1]
+        choice = click.prompt(
+            "Select a track to fix",
+            type=click.IntRange(1, min(len(hits), 10)),
+        )
+        filepath = hits[choice - 1]
+    else:
+        filepath = hits[0]
     artist, album, song = track_parts(filepath)
     if not click.confirm(f'Fix "{song}" — {artist}?', default=True):
         console.print("[yellow]Cancelled[/yellow]")
