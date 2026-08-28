@@ -167,7 +167,7 @@ def fix(query: tuple[str, ...]):
                 comp = (a, b, c)[idx].lower()
                 if comp and comp not in by_component:
                     by_component[comp] = p
-            for m in difflib.get_close_matches(needle, list(by_component), n=10, cutoff=0.45):
+            for m in difflib.get_close_matches(needle, list(by_component), n=len(by_component), cutoff=0.6):
                 candidates.add(by_component[m])
 
         def best_score(p: Path) -> float:
