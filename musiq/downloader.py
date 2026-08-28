@@ -23,7 +23,7 @@ _CONFIDENCE_THRESHOLD = 0.6
 
 
 def sanitize(name: str) -> str:
-    return _INVALID_CHARS.sub("_", name.strip())
+    return _INVALID_CHARS.sub("_", name.strip()).lower()
 
 
 def primary_artist(artist: str) -> str:
@@ -187,21 +187,35 @@ def process_track(
         album_dir.mkdir(parents=True, exist_ok=True)
         out_stem = f"{track_num:02d} - {sanitize(artist)} - {sanitize(title)}"
         final_path = album_dir / f"{out_stem}.mp3"
+
+        if final_path.exists() and not force:
+            console.print(f"[yellow]⚠ File exists at destination, skipping: {title}[/yellow]")
+            downloaded.unlink()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            total_timer.stop()
+            perf.t_total_ms = total_timer.elapsed_ms
+            perf.status = "skipped"
+            insert_perf(perf)
+            return {"status": "skipped", "title": title, "artist": artist, "duration": duration_sec}
+
         shutil.copy2(str(downloaded), str(final_path))
         downloaded.unlink()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
         with Timer() as ttag:
-            tag_file(
-                final_path,
-                title=title,
-                artist=artist,
-                album=album,
-                track_number=track_num,
-                year=year,
-                genre=genre,
-                cover_url=cover_url,
-            )
+            try:
+                tag_file(
+                    final_path,
+                    title=title,
+                    artist=artist,
+                    album=album,
+                    track_number=track_num,
+                    year=year,
+                    genre=genre,
+                    cover_url=cover_url,
+                )
+            except Exception:
+                console.print(f"  [yellow]⚠ Tags not written for {title}[/yellow]")
         perf.t_tag_ms = ttag.elapsed_ms
 
     perf.t_total_ms = total_timer.elapsed_ms
@@ -223,9 +237,13 @@ def _ytm_download(query: str, ydl_opts: dict) -> Path:
         entry = info["entries"][0] if "entries" in info else info
         filename = ydl.prepare_filename(entry)
         path = Path(filename)
+        # prepare_filename returns pre-post-processor path (e.g. .webm).
+        # After FFmpegExtractAudio, the .mp3 is the real output.
         audio_exts = {".webm", ".m4a", ".opus", ".ogg", ".aac", ".wav", ".flac"}
         if path.suffix in audio_exts:
             return path.with_suffix(".mp3")
+        # Fallback: glob .mp3s in the temp dir.
+        # Assumes temp_dir is freshly created (mkdtemp above) so no stale files match.
         temp_dir = path.parent
         mp3_files = sorted(temp_dir.glob("*.mp3"))
         if mp3_files:
@@ -246,14 +264,14 @@ def handle_url(
     resolved = resolve_entity(url)
     if resolved is None:
         console.print("[yellow]Could not resolve Spotify URL. Falling back to fallback handler...[/yellow]")
-        return _fallback_url(url, dry_run=dry_run)
+        return _fallback_url(url, dry_run=dry_run, no_itunes=no_itunes, force=force)
 
     tracks = resolved if isinstance(resolved, list) else [resolved]
     if not tracks:
         console.print("[red]✖ No tracks found from URL[/red]")
         return []
 
-    if not no_itunes and len(tracks) > 1:
+    if not no_itunes and len(tracks) > 1 and tracks[0].get("_source_type") == "album":
         itunes_cache: dict[str, dict] = {}
         album_name_votes: dict[str, int] = {}
         genre_votes: dict[str, int] = {}
@@ -341,7 +359,7 @@ def _parallel_process(tracks: list[dict], **kwargs) -> list[dict]:
     return [results_map[i] for i in range(total)]
 
 
-def _fallback_url(url: str, *, dry_run: bool = False) -> list[dict]:
+def _fallback_url(url: str, *, dry_run: bool = False, no_itunes: bool = False, force: bool = False) -> list[dict]:
     if dry_run:
         console.print(f"  [cyan]Would download from URL:[/cyan] {url}")
         return [{"status": "dry-run", "title": url, "artist": "?", "duration": 0}]
@@ -364,10 +382,11 @@ def _fallback_url(url: str, *, dry_run: bool = False) -> list[dict]:
                 for entry in tracks_data:
                     t = resolve_track(f"https://open.spotify.com/track/{entry['id']}")
                     if t:
-                        t["album"] = entry.get("album_name", "")
+                        t.setdefault("album", "")
                         t["cover_url"] = t.get("cover_url") or entry.get("cover_url", "")
                         t["track_number"] = entry.get("track_number", 0) or 0
-                        results.append(process_track(t, no_itunes=False, dry_run=False, force=True))
+                        t["_source_type"] = kind
+                        results.append(process_track(t, no_itunes=no_itunes, dry_run=False, force=force))
                     else:
                         artist = entry.get("artist", "")
                         fallback = {
@@ -375,15 +394,16 @@ def _fallback_url(url: str, *, dry_run: bool = False) -> list[dict]:
                             "title": entry.get("title", ""),
                             "artist": artist,
                             "artists": [artist] if artist else [],
-                            "album": entry.get("album_name", ""),
+                            "album": "",
                             "track_number": entry.get("track_number", 0) or 0,
                             "duration_ms": entry.get("duration_ms", 0) or 0,
                             "cover_url": entry.get("cover_url", ""),
                             "year": "",
                             "release_date": "",
                             "explicit": False,
+                            "_source_type": kind,
                         }
-                        results.append(process_track(fallback, no_itunes=False, dry_run=False, force=True))
+                        results.append(process_track(fallback, no_itunes=no_itunes, dry_run=False, force=force))
                 if results:
                     return results
         except Exception as exc:
@@ -401,8 +421,13 @@ def handle_search_selection(
     force: bool = False,
 ) -> dict:
     MUSIQ_DIR.mkdir(parents=True, exist_ok=True)
+    from musiq.spotify import search_track_on_spotify
+    spotify_id = search_track_on_spotify(
+        song_meta.get("title", ""),
+        song_meta.get("artist", ""),
+    )
     meta = {
-        "id": "",  # search uses iTunes IDs, not Spotify IDs — skip dedup
+        "id": spotify_id or "",
         "title": song_meta.get("title", ""),
         "artist": song_meta.get("artist", ""),
         "artists": song_meta.get("artists", [song_meta.get("artist", "")]),

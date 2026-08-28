@@ -10,7 +10,7 @@ from rich.table import Table
 from musiq.display import console, summary_table, stats_table
 from musiq.downloader import handle_url, handle_search_selection, _ytm_download
 from musiq.history import get_all_downloads, clear_downloads, get_stats
-from musiq.spotify import search_itunes
+from musiq.itunes import search_itunes
 from musiq.tagger import read_id3_tags, rewrite_id3_tags
 
 

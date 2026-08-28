@@ -48,19 +48,29 @@ def get_conn() -> sqlite3.Connection:
 def track_exists(spotify_id: str) -> bool:
     with _lock:
         conn = get_conn()
-        cur = conn.execute("SELECT 1 FROM downloads WHERE spotify_id = ?", (spotify_id,))
-        exists = cur.fetchone() is not None
+        cur = conn.execute("SELECT file_path FROM downloads WHERE spotify_id = ?", (spotify_id,))
+        row = cur.fetchone()
         conn.close()
-    return exists
+    if row is None:
+        return False
+    file_path = row[0]
+    if not file_path:
+        return False
+    return Path(file_path).exists()
 
 
 def add_download(spotify_id: str, title: str, artist: str, album: str | None, file_path: str | None):
     with _lock:
         conn = get_conn()
         conn.execute(
-            "INSERT OR IGNORE INTO downloads "
-            "(spotify_id, title, artist, album, file_path, downloaded_at) "
-            "VALUES (?, ?, ?, ?, ?, datetime('now'))",
+            """INSERT INTO downloads (spotify_id, title, artist, album, file_path, downloaded_at)
+               VALUES (?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(spotify_id) DO UPDATE SET
+                 title=excluded.title,
+                 artist=excluded.artist,
+                 album=excluded.album,
+                 file_path=excluded.file_path,
+                 downloaded_at=excluded.downloaded_at""",
             (spotify_id, title, artist, album, file_path),
         )
         conn.commit()

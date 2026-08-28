@@ -2,6 +2,7 @@ import os
 
 import requests
 
+from musiq.display import console
 from musiq.utils import artist_match as artist_match_confidence
 
 
@@ -85,3 +86,29 @@ def _extract(r: dict) -> dict:
         "artwork_url": artwork,
         "album": r.get("collectionName", ""),
     }
+
+
+def search_itunes(query: str) -> list[dict]:
+    try:
+        resp = requests.get(
+            "https://itunes.apple.com/search",
+            params={"term": query, "entity": "song", "limit": 10, "country": "US"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        return [
+            {
+                "id": str(r.get("trackId", "")),
+                "title": r.get("trackName", ""),
+                "artist": r.get("artistName", ""),
+                "artists": [r.get("artistName", "")],
+                "album": r.get("collectionName", ""),
+                "duration_ms": r.get("trackTimeMillis", 0) or 0,
+                "cover_url": (r.get("artworkUrl100") or "").replace("100x100", "1200x1200"),
+            }
+            for r in results
+        ]
+    except Exception as exc:
+        console.print(f"[red]Search failed: {exc}[/red]")
+        return []

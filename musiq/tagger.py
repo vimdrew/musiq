@@ -60,6 +60,7 @@ def tag_file(
         audio.tag.save(encoding="utf-8")
     except Exception as exc:
         console.print(f"[yellow]⚠ Tagging warning: {exc}[/yellow]")
+        raise
 
 
 def read_id3_tags(filepath: Path) -> dict:

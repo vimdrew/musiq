@@ -54,16 +54,22 @@ class SpotifyClient:
     def _ensure_token(self) -> None:
         if time.time() < self._token_expires_at:
             return
-        resp = requests.post(
-            "https://accounts.spotify.com/api/token",
-            data={"grant_type": "client_credentials"},
-            auth=(self._client_id, self._client_secret),
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        self._token = data["access_token"]
-        self._token_expires_at = time.time() + data["expires_in"] - 60
+        for _ in range(2):
+            resp = requests.post(
+                "https://accounts.spotify.com/api/token",
+                data={"grant_type": "client_credentials"},
+                auth=(self._client_id, self._client_secret),
+                timeout=15,
+            )
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", 60))
+                time.sleep(retry_after)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            self._token = data["access_token"]
+            self._token_expires_at = time.time() + data["expires_in"] - 60
+            return
 
     def _headers(self) -> dict:
         self._ensure_token()
@@ -72,44 +78,62 @@ class SpotifyClient:
     def get_track(self, track_id: str) -> dict | None:
         if not self.configured:
             return None
-        try:
-            resp = requests.get(
-                f"https://api.spotify.com/v1/tracks/{track_id}",
-                headers=self._headers(),
-                timeout=15,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
+        for attempt in range(2):
+            try:
+                resp = requests.get(
+                    f"https://api.spotify.com/v1/tracks/{track_id}",
+                    headers=self._headers(),
+                    timeout=15,
+                )
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", 60))
+                    time.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except Exception:
+                if attempt:
+                    return None
 
     def get_album(self, album_id: str) -> dict | None:
         if not self.configured:
             return None
-        try:
-            resp = requests.get(
-                f"https://api.spotify.com/v1/albums/{album_id}",
-                headers=self._headers(),
-                timeout=15,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
+        for attempt in range(2):
+            try:
+                resp = requests.get(
+                    f"https://api.spotify.com/v1/albums/{album_id}",
+                    headers=self._headers(),
+                    timeout=15,
+                )
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", 60))
+                    time.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except Exception:
+                if attempt:
+                    return None
 
     def get_playlist(self, playlist_id: str) -> dict | None:
         if not self.configured:
             return None
-        try:
-            resp = requests.get(
-                f"https://api.spotify.com/v1/playlists/{playlist_id}",
-                headers=self._headers(),
-                timeout=15,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except Exception:
-            return None
+        for attempt in range(2):
+            try:
+                resp = requests.get(
+                    f"https://api.spotify.com/v1/playlists/{playlist_id}",
+                    headers=self._headers(),
+                    timeout=15,
+                )
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", 60))
+                    time.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except Exception:
+                if attempt:
+                    return None
 
 
 _spotify_client = SpotifyClient()
@@ -176,6 +200,7 @@ def _api_album_to_tracks(data: dict) -> list[dict] | None:
             "year": year,
             "release_date": release_date,
             "explicit": item.get("explicit", False),
+            "_source_type": "album",
         })
     return results if results else None
 
@@ -208,6 +233,7 @@ def _api_playlist_to_tracks(data: dict) -> list[dict] | None:
             "year": year,
             "release_date": release_date,
             "explicit": track.get("explicit", False),
+            "_source_type": "playlist",
         })
     return results if results else None
 
@@ -337,7 +363,6 @@ def resolve_embed_track_list(kind: str, sid: str) -> list[dict] | None:
         if not track_list:
             return None
 
-        album_name = entity.get("name", "")
         vi = entity.get("visualIdentity") or {}
         images = vi.get("image", []) if isinstance(vi, dict) else []
         cover_url = max(images, key=lambda x: x.get("maxWidth", 0) * x.get("maxHeight", 0)).get("url", "") if images else ""
@@ -352,7 +377,6 @@ def resolve_embed_track_list(kind: str, sid: str) -> list[dict] | None:
                 "title": entry.get("title", ""),
                 "artist": entry.get("subtitle", ""),
                 "duration_ms": entry.get("duration", 0),
-                "album_name": album_name,
                 "cover_url": cover_url,
                 "track_number": i + 1,
             })
@@ -410,9 +434,10 @@ def _resolve_collection_from_embed(kind: str, sid: str) -> list[dict] | None:
         for entry in tracks_data:
             t = resolve_track(f"https://open.spotify.com/track/{entry['id']}")
             if t:
-                t["album"] = entry.get("album_name", "")
+                t.setdefault("album", "")
                 t["cover_url"] = t.get("cover_url") or entry.get("cover_url", "")
                 t["track_number"] = entry.get("track_number", 0) or 0
+                t["_source_type"] = kind
                 results.append(t)
             else:
                 artist = entry.get("artist", "")
@@ -421,45 +446,46 @@ def _resolve_collection_from_embed(kind: str, sid: str) -> list[dict] | None:
                     "title": entry.get("title", ""),
                     "artist": artist,
                     "artists": [artist] if artist else [],
-                    "album": entry.get("album_name", ""),
+                    "album": "",
                     "track_number": entry.get("track_number", 0) or 0,
                     "duration_ms": entry.get("duration_ms", 0) or 0,
                     "cover_url": entry.get("cover_url", ""),
                     "year": "",
                     "release_date": "",
                     "explicit": False,
+                    "_source_type": kind,
                 })
         return results if results else None
     except Exception:
         return None
 
 
-# ── Search (via iTunes) ───────────────────────────────────────────
+# ── Search (Spotify API) ─────────────────────────────────────────
 
-def search_itunes(query: str) -> list[dict]:
-    try:
-        resp = requests.get(
-            "https://itunes.apple.com/search",
-            params={"term": query, "entity": "song", "limit": 10, "country": "US"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-        return [
-            {
-                "id": str(r.get("trackId", "")),
-                "title": r.get("trackName", ""),
-                "artist": r.get("artistName", ""),
-                "artists": [r.get("artistName", "")],
-                "album": r.get("collectionName", ""),
-                "duration_ms": r.get("trackTimeMillis", 0) or 0,
-                "cover_url": (r.get("artworkUrl100") or "").replace("100x100", "1200x1200"),
-            }
-            for r in results
-        ]
-    except Exception as exc:
-        console.print(f"[red]Search failed: {exc}[/red]")
-        return []
+def search_track_on_spotify(title: str, artist: str) -> str | None:
+    if not _spotify_client.configured:
+        return None
+    for attempt in range(2):
+        try:
+            resp = requests.get(
+                "https://api.spotify.com/v1/search",
+                params={"q": f"{artist} {title}", "type": "track", "limit": 3},
+                headers=_spotify_client._headers(),
+                timeout=10,
+            )
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", 60))
+                time.sleep(retry_after)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            tracks = data.get("tracks", {}).get("items", [])
+            if tracks:
+                return tracks[0].get("id")
+        except Exception:
+            if attempt:
+                return None
+    return None
 
 
 # ── Unified entry point ───────────────────────────────────────────
