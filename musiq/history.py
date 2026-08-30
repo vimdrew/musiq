@@ -109,6 +109,16 @@ def get_all_downloads():
     return rows
 
 
+def remove_download_by_path(file_path: str) -> int:
+    """Delete history rows whose file_path matches, returning rows deleted."""
+    with _lock:
+        conn = get_conn()
+        cur = conn.execute("DELETE FROM downloads WHERE file_path = ?", (file_path,))
+        conn.commit()
+        conn.close()
+    return cur.rowcount
+
+
 def clear_downloads():
     with _lock:
         conn = get_conn()

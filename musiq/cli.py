@@ -10,6 +10,7 @@ from rich.table import Table
 
 from musiq.display import console, summary_table, stats_table
 from musiq.downloader import handle_url, handle_search_selection, _ytm_download
+from musiq.duplicates import dedupe
 from musiq.history import get_all_downloads, clear_downloads, get_stats
 from musiq.itunes import search_itunes
 from musiq.tagger import read_id3_tags, rewrite_id3_tags
@@ -359,6 +360,14 @@ def edit(query: tuple[str, ...]):
         f"[dim]Genre:[/dim] {tags['genre'] or '—'}  "
         f"[dim]Year:[/dim] {tags['year'] or '—'}"
     )
+
+
+@cli.command("duplicates")
+@click.option("--yes", "auto_yes", is_flag=True, help="Auto-confirm deleting duplicate copies")
+def duplicates(auto_yes: bool):
+    """Scan the library for duplicate tracks and remove extras."""
+    music_dir = _music_dir()
+    dedupe(music_dir, auto_yes=auto_yes)
 
 
 def _project_root() -> Path | None:
