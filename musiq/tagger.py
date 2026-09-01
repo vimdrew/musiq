@@ -41,6 +41,7 @@ def tag_file(
     genre: str,
     cover_url: str | None = None,
     artists: list[str] | None = None,
+    album_artist: str | None = None,
 ) -> None:
     try:
         audio = eyed3.load(str(filepath))
@@ -52,6 +53,7 @@ def tag_file(
 
         audio.tag.title = title
         _set_artist_frames(audio.tag, artists or artist)
+        audio.tag.album_artist = album_artist or ""
         audio.tag.album = album
         audio.tag.track_num = track_number
         normalised = normalise_genre(genre) if genre else None
@@ -89,6 +91,7 @@ def read_id3_tags(filepath: Path) -> dict:
         "title": tag.title or "",
         "artist": tag.artist or "",
         "artists": artists,
+        "album_artist": tag.album_artist or "",
         "album": tag.album or "",
         "track_num": tag.track_num[0] if tag.track_num and tag.track_num[0] else 0,
         "disc_num": tag.disc_num[0] if tag.disc_num and tag.disc_num[0] else 0,
@@ -110,7 +113,7 @@ def read_id3_tags(filepath: Path) -> dict:
 
     if hasattr(tag, "frame_set") and tag.frame_set:
         for frame_id, frame_list in tag.frame_set.items():
-            if frame_id not in ("TIT2", "TPE1", "TALB", "TRCK", "TPOS", "TCON", "TDRC", "APIC"):
+            if frame_id not in ("TIT2", "TPE1", "TPE2", "TALB", "TRCK", "TPOS", "TCON", "TDRC", "APIC"):
                 tags.setdefault("other_frames", []).append(frame_id)
 
     return tags
@@ -138,6 +141,7 @@ def rewrite_id3_tags(filepath: Path, tags: dict) -> None:
 
         audio.tag.title = tags.get("title", "")
         _set_artist_frames(audio.tag, tags.get("artists") or tags.get("artist", ""))
+        audio.tag.album_artist = tags.get("album_artist", "")
         audio.tag.album = tags.get("album", "")
         audio.tag.track_num = tags.get("track_num", 0)
         disc_num = tags.get("disc_num", 0)

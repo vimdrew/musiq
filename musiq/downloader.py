@@ -219,6 +219,7 @@ def process_track(
                     genre=genre,
                     cover_url=cover_url,
                     artists=meta.get("artists") or None,
+                    album_artist=_folder_artist(meta, artist),
                 )
             except Exception:
                 console.print(f"  [yellow]⚠ Tags not written for {title}[/yellow]")
