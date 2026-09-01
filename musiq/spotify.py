@@ -181,6 +181,8 @@ def _api_album_to_tracks(data: dict) -> list[dict] | None:
     release_date = data.get("release_date", "")
     year = _extract_year(release_date)
     cover_url = _best_image(data.get("images", []))
+    album_artists = [a["name"] for a in data.get("artists", []) if isinstance(a, dict) and a.get("name")]
+    album_artist = ", ".join(album_artists)
     tracks_container = data.get("tracks") or {}
     items = tracks_container.get("items", []) if isinstance(tracks_container, dict) else []
     results = []
@@ -191,9 +193,11 @@ def _api_album_to_tracks(data: dict) -> list[dict] | None:
         results.append({
             "id": item.get("id", ""),
             "title": item.get("name", ""),
-            "artist": ", ".join(track_artists) if track_artists else "",
+            "artist": ", ".join(track_artists) if track_artists else album_artist,
             "artists": track_artists,
             "album": album_name,
+            "album_artist": album_artist,
+            "album_id": data.get("id", ""),
             "track_number": item.get("track_number", 0) or 0,
             "duration_ms": item.get("duration_ms", 0) or 0,
             "cover_url": cover_url,
@@ -367,6 +371,17 @@ def resolve_embed_track_list(kind: str, sid: str) -> list[dict] | None:
         images = vi.get("image", []) if isinstance(vi, dict) else []
         cover_url = max(images, key=lambda x: x.get("maxWidth", 0) * x.get("maxHeight", 0)).get("url", "") if images else ""
 
+        album_name = ""
+        album_artist = ""
+        if kind == "album":
+            album_name = entity.get("name", "") or ""
+            album_artists = [
+                a.get("name", "")
+                for a in (entity.get("artists") or [])
+                if isinstance(a, dict) and a.get("name")
+            ]
+            album_artist = ", ".join(album_artists)
+
         results = []
         for i, entry in enumerate(track_list):
             uid = entry.get("uri", "").split(":")[-1] or entry.get("uid", "")
@@ -376,6 +391,8 @@ def resolve_embed_track_list(kind: str, sid: str) -> list[dict] | None:
                 "id": uid,
                 "title": entry.get("title", ""),
                 "artist": entry.get("subtitle", ""),
+                "album": album_name,
+                "album_artist": album_artist,
                 "duration_ms": entry.get("duration", 0),
                 "cover_url": cover_url,
                 "track_number": i + 1,
@@ -434,7 +451,9 @@ def _resolve_collection_from_embed(kind: str, sid: str) -> list[dict] | None:
         for entry in tracks_data:
             t = resolve_track(f"https://open.spotify.com/track/{entry['id']}")
             if t:
-                t.setdefault("album", "")
+                t["album"] = entry.get("album") or t.get("album") or ""
+                if entry.get("album_artist"):
+                    t["album_artist"] = entry["album_artist"]
                 t["cover_url"] = t.get("cover_url") or entry.get("cover_url", "")
                 t["track_number"] = entry.get("track_number", 0) or 0
                 t["_source_type"] = kind
@@ -446,7 +465,8 @@ def _resolve_collection_from_embed(kind: str, sid: str) -> list[dict] | None:
                     "title": entry.get("title", ""),
                     "artist": artist,
                     "artists": [artist] if artist else [],
-                    "album": "",
+                    "album": entry.get("album", ""),
+                    "album_artist": entry.get("album_artist", ""),
                     "track_number": entry.get("track_number", 0) or 0,
                     "duration_ms": entry.get("duration_ms", 0) or 0,
                     "cover_url": entry.get("cover_url", ""),

@@ -2,6 +2,7 @@ from pathlib import Path
 
 import eyed3
 import requests
+from eyed3.id3 import frames
 
 from musiq.display import console
 
@@ -19,6 +20,17 @@ def normalise_genre(genre: str) -> str:
     return GENRE_MAP.get(genre, genre)
 
 
+def _set_artist_frames(tag, artists) -> None:
+    """Write TPE1 as a multi-value field (one frame per artist)."""
+    if isinstance(artists, str):
+        artists = [artists]
+    artists = [a for a in (artists or []) if a]
+
+    tag.frame_set.pop(frames.ARTIST_FID, None)
+    for artist in artists or [""]:
+        tag.frame_set[frames.ARTIST_FID] = frames.TextFrame(frames.ARTIST_FID, artist)
+
+
 def tag_file(
     filepath: Path,
     title: str,
@@ -28,6 +40,7 @@ def tag_file(
     year: str,
     genre: str,
     cover_url: str | None = None,
+    artists: list[str] | None = None,
 ) -> None:
     try:
         audio = eyed3.load(str(filepath))
@@ -38,7 +51,7 @@ def tag_file(
             audio.initTag()
 
         audio.tag.title = title
-        audio.tag.artist = artist
+        _set_artist_frames(audio.tag, artists or artist)
         audio.tag.album = album
         audio.tag.track_num = track_number
         normalised = normalise_genre(genre) if genre else None
@@ -70,9 +83,12 @@ def read_id3_tags(filepath: Path) -> dict:
         return {}
 
     tag = audio.tag
+    artist_frames = tag.frame_set[frames.ARTIST_FID] or []
+    artists = [f.text for f in artist_frames if f.text]
     tags: dict = {
         "title": tag.title or "",
         "artist": tag.artist or "",
+        "artists": artists,
         "album": tag.album or "",
         "track_num": tag.track_num[0] if tag.track_num and tag.track_num[0] else 0,
         "disc_num": tag.disc_num[0] if tag.disc_num and tag.disc_num[0] else 0,
@@ -93,7 +109,7 @@ def read_id3_tags(filepath: Path) -> dict:
         })
 
     if hasattr(tag, "frame_set") and tag.frame_set:
-        for frame_id, frames in tag.frame_set.items():
+        for frame_id, frame_list in tag.frame_set.items():
             if frame_id not in ("TIT2", "TPE1", "TALB", "TRCK", "TPOS", "TCON", "TDRC", "APIC"):
                 tags.setdefault("other_frames", []).append(frame_id)
 
@@ -121,7 +137,7 @@ def rewrite_id3_tags(filepath: Path, tags: dict) -> None:
             audio.tag.frame_set.clear()
 
         audio.tag.title = tags.get("title", "")
-        audio.tag.artist = tags.get("artist", "")
+        _set_artist_frames(audio.tag, tags.get("artists") or tags.get("artist", ""))
         audio.tag.album = tags.get("album", "")
         audio.tag.track_num = tags.get("track_num", 0)
         disc_num = tags.get("disc_num", 0)

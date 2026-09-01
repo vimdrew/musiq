@@ -331,7 +331,11 @@ def edit(query: tuple[str, ...]):
     console.print(f"  [dim]{tags.get('title') or song} — {tags.get('artist') or artist}[/dim]")
 
     tags["title"] = click.prompt("Title", default=tags.get("title") or "", type=str)
-    tags["artist"] = click.prompt("Artist", default=tags.get("artist") or "", type=str)
+    orig_artist = tags.get("artist") or ""
+    new_artist = click.prompt("Artist", default=orig_artist, type=str)
+    tags["artist"] = new_artist
+    if new_artist != orig_artist:
+        tags["artists"] = [new_artist]
     tags["album"] = click.prompt("Album", default=tags.get("album") or "", type=str)
     tags["track_num"] = click.prompt("Track number", default=tags.get("track_num") or 0, type=int)
     tags["disc_num"] = click.prompt("Disc number", default=tags.get("disc_num") or 0, type=int)

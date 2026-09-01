@@ -8,7 +8,7 @@ import yt_dlp
 
 from musiq.display import console
 from musiq.history import track_exists, add_download, insert_perf
-from musiq.itunes import fetch_metadata as itunes_search, resolve_canonical_album
+from musiq.itunes import fetch_metadata as itunes_search
 from musiq.perf import Timer, PerfRecord
 from musiq.spotify import resolve_entity
 from musiq.tagger import tag_file
@@ -23,21 +23,29 @@ _CONFIDENCE_THRESHOLD = 0.6
 
 
 def sanitize(name: str) -> str:
-    return _INVALID_CHARS.sub("_", name.strip()).lower()
+    """Make a name safe for use in a folder/file path.
+
+    Keeps the original casing so paths use the exact artist/album name
+    provided by Spotify (its canonical casing) rather than a lowercased
+    derivation from scraped text.
+    """
+    return _INVALID_CHARS.sub("_", name.strip())
 
 
 def primary_artist(artist: str) -> str:
     return artist.split(",")[0].strip()
 
 
-def resolve_album_name(spotify_album: str | None, itunes_album: str | None, track_title: str) -> str:
-    if spotify_album:
-        return spotify_album
-    if itunes_album and not itunes_album.endswith("- Single"):
-        return itunes_album
-    if itunes_album:
-        return itunes_album
-    return f"{track_title} - Single"
+def _folder_artist(meta: dict, artist: str) -> str:
+    """Artist used for the output folder.
+
+    For album downloads the primary artist comes from the Spotify album
+    object (album_artist) so every track lands in the same folder. Other
+    sources fall back to the track's own primary artist.
+    """
+    if meta.get("album_artist"):
+        return primary_artist(meta["album_artist"])
+    return primary_artist(artist)
 
 
 def _join_artists(meta: dict) -> str:
@@ -164,10 +172,7 @@ def process_track(
                 return {"status": "failed", "title": title, "artist": artist, "duration": duration_sec}
             downloaded, filesize_kb = dl_result
 
-        if meta.get("resolved_album"):
-            album = meta["resolved_album"]
-        else:
-            album = resolve_album_name(meta.get("album"), itunes_meta.get("album"), title)
+        album = meta.get("album") or f"{title} - Single"
 
         if cover_url is None and itunes_meta.get("artwork_url"):
             cover_url = itunes_meta["artwork_url"]
@@ -183,7 +188,7 @@ def process_track(
             genre = meta.get("resolved_genre") or itunes_meta.get("genre", "")
             year = spotify_year or meta.get("resolved_year") or itunes_meta.get("year", "")
 
-        album_dir = OUTPUT_BASE / sanitize(primary_artist(artist)) / sanitize(album)
+        album_dir = OUTPUT_BASE / sanitize(_folder_artist(meta, artist)) / sanitize(album)
         album_dir.mkdir(parents=True, exist_ok=True)
         out_stem = f"{track_num:02d} - {sanitize(artist)} - {sanitize(title)}"
         final_path = album_dir / f"{out_stem}.mp3"
@@ -207,12 +212,13 @@ def process_track(
                 tag_file(
                     final_path,
                     title=title,
-                    artist=artist,
+                    artist=primary_artist(artist),
                     album=album,
                     track_number=track_num,
                     year=year,
                     genre=genre,
                     cover_url=cover_url,
+                    artists=meta.get("artists") or None,
                 )
             except Exception:
                 console.print(f"  [yellow]⚠ Tags not written for {title}[/yellow]")
@@ -273,10 +279,9 @@ def handle_url(
 
     if not no_itunes and len(tracks) > 1 and tracks[0].get("_source_type") == "album":
         itunes_cache: dict[str, dict] = {}
-        album_name_votes: dict[str, int] = {}
         genre_votes: dict[str, int] = {}
         year_votes: dict[str, int] = {}
-        console.print("[dim]Fetching iTunes metadata for album detection...[/dim]")
+        console.print("[dim]Fetching iTunes metadata (genre/year enrichment)...[/dim]")
         for track in tracks:
             meta = itunes_search(
                 _join_artists(track),
@@ -288,26 +293,15 @@ def handle_url(
                     itunes_cache[sid] = meta
                 confidence = meta.get("confidence", 0.0)
                 if confidence >= _CONFIDENCE_THRESHOLD:
-                    if meta.get("album"):
-                        album_name_votes[meta["album"]] = album_name_votes.get(meta["album"], 0) + 1
                     if meta.get("genre"):
                         genre_votes[meta["genre"]] = genre_votes.get(meta["genre"], 0) + 1
                     if meta.get("year"):
                         year_votes[str(meta["year"])] = year_votes.get(str(meta["year"]), 0) + 1
 
-        canonical_album = None
-        if album_name_votes:
-            canonical_album = resolve_canonical_album(
-                spotify_album=tracks[0].get("album"),
-                itunes_votes=album_name_votes,
-                track_title=tracks[0]["title"],
-            )
         canonical_genre = max(genre_votes, key=genre_votes.get) if genre_votes else ""
         canonical_year = max(year_votes, key=year_votes.get) if year_votes else ""
 
         for track in tracks:
-            if canonical_album:
-                track["resolved_album"] = canonical_album
             track["resolved_genre"] = canonical_genre
             track["resolved_year"] = canonical_year
             track["_itunes_cache"] = itunes_cache.get(track.get("id", ""), {})
@@ -382,7 +376,9 @@ def _fallback_url(url: str, *, dry_run: bool = False, no_itunes: bool = False, f
                 for entry in tracks_data:
                     t = resolve_track(f"https://open.spotify.com/track/{entry['id']}")
                     if t:
-                        t.setdefault("album", "")
+                        t["album"] = entry.get("album") or t.get("album") or ""
+                        if entry.get("album_artist"):
+                            t["album_artist"] = entry["album_artist"]
                         t["cover_url"] = t.get("cover_url") or entry.get("cover_url", "")
                         t["track_number"] = entry.get("track_number", 0) or 0
                         t["_source_type"] = kind
@@ -394,7 +390,8 @@ def _fallback_url(url: str, *, dry_run: bool = False, no_itunes: bool = False, f
                             "title": entry.get("title", ""),
                             "artist": artist,
                             "artists": [artist] if artist else [],
-                            "album": "",
+                            "album": entry.get("album", ""),
+                            "album_artist": entry.get("album_artist", ""),
                             "track_number": entry.get("track_number", 0) or 0,
                             "duration_ms": entry.get("duration_ms", 0) or 0,
                             "cover_url": entry.get("cover_url", ""),
@@ -421,7 +418,7 @@ def handle_search_selection(
     force: bool = False,
 ) -> dict:
     MUSIQ_DIR.mkdir(parents=True, exist_ok=True)
-    from musiq.spotify import search_track_on_spotify
+    from musiq.spotify import search_track_on_spotify, _spotify_client, _api_to_track_dict
     spotify_id = search_track_on_spotify(
         song_meta.get("title", ""),
         song_meta.get("artist", ""),
@@ -436,4 +433,8 @@ def handle_search_selection(
         "duration_ms": song_meta.get("duration_ms", 0),
         "cover_url": song_meta.get("cover_url", ""),
     }
+    if spotify_id:
+        track_data = _spotify_client.get_track(spotify_id)
+        if track_data:
+            meta = _api_to_track_dict(track_data, spotify_id)
     return process_track(meta, no_itunes=no_itunes, dry_run=dry_run, force=force)
