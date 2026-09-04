@@ -1,3 +1,4 @@
+import os
 import re
 import shutil
 import tempfile
@@ -20,6 +21,23 @@ MUSIQ_DIR = Path.home() / ".musiq"
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*]')
 _PARALLEL_LOCK = threading.Lock()
 _CONFIDENCE_THRESHOLD = 0.6
+
+
+def _cookies_browser() -> str | None:
+    """Browser to pull YouTube cookies from (opt-in), or None if unset."""
+    value = os.environ.get("YTDLP_COOKIES_BROWSER")
+    if value:
+        return value.strip()
+    cfg = Path.home() / ".musiq" / "config"
+    if cfg.is_file():
+        try:
+            for line in cfg.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("YTDLP_COOKIES_BROWSER="):
+                    return line.split("=", 1)[1].strip()
+        except OSError:
+            pass
+    return None
 
 
 def sanitize(name: str) -> str:
@@ -142,6 +160,9 @@ def process_track(
             "quiet": True,
             "no_warnings": True,
         }
+        cookies_browser = _cookies_browser()
+        if cookies_browser:
+            ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
         dl_url = video_url or f"ytsearch1:{title} {artist}"
 
         if not itunes_cached and not no_itunes:
