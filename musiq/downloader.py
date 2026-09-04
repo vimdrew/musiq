@@ -23,21 +23,63 @@ _PARALLEL_LOCK = threading.Lock()
 _CONFIDENCE_THRESHOLD = 0.6
 
 
+def _load_config() -> dict[str, str]:
+    cfg: dict[str, str] = {}
+    config_path = Path.home() / ".musiq" / "config"
+    if config_path.is_file():
+        try:
+            for line in config_path.read_text().splitlines():
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    key, _, value = line.partition("=")
+                    cfg[key.strip()] = value.strip()
+        except OSError:
+            pass
+    return cfg
+
+
 def _cookies_browser() -> str | None:
-    """Browser to pull YouTube cookies from (opt-in), or None if unset."""
+    """Browser to pull YouTube cookies from (opt-in), or None if unset.
+
+    Env var takes priority over the config file, mirroring the other
+    config options.
+    """
     value = os.environ.get("YTDLP_COOKIES_BROWSER")
     if value:
         return value.strip()
-    cfg = Path.home() / ".musiq" / "config"
-    if cfg.is_file():
-        try:
-            for line in cfg.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("YTDLP_COOKIES_BROWSER="):
-                    return line.split("=", 1)[1].strip()
-        except OSError:
-            pass
-    return None
+    cfg = _load_config()
+    return cfg.get("YTDLP_COOKIES_BROWSER") or None
+
+
+def _cookies_file() -> str | None:
+    """Path to a cookies.txt file (opt-in), or None if unset.
+
+    Env var takes priority over the config file, mirroring the other
+    config options.
+    """
+    value = os.environ.get("YTDLP_COOKIES_FILE")
+    if value:
+        return value.strip()
+    cfg = _load_config()
+    return cfg.get("YTDLP_COOKIES_FILE") or None
+
+
+_cookies_file_warned = False
+
+
+def _warn_cookies_file_missing() -> None:
+    """Log a missing cookies file warning once per process, not per track."""
+    global _cookies_file_warned
+    if _cookies_file_warned:
+        return
+    path = _cookies_file()
+    if path and not Path(path).expanduser().is_file():
+        console.print(
+            f"[yellow]⚠ Cookies file not found: {path}[/yellow]\n"
+            f"[yellow]  Age-restricted downloads may fail. Export cookies with e.g. "
+            f"'yt-dlp --cookies-from-browser chromium --cookies {path}'.[/yellow]"
+        )
+        _cookies_file_warned = True
 
 
 def sanitize(name: str) -> str:
@@ -160,9 +202,14 @@ def process_track(
             "quiet": True,
             "no_warnings": True,
         }
-        cookies_browser = _cookies_browser()
-        if cookies_browser:
-            ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
+        cookies_file = _cookies_file()
+        if cookies_file:
+            ydl_opts["cookiefile"] = cookies_file
+            _warn_cookies_file_missing()
+        else:
+            cookies_browser = _cookies_browser()
+            if cookies_browser:
+                ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
         dl_url = video_url or f"ytsearch1:{title} {artist}"
 
         if not itunes_cached and not no_itunes:
