@@ -9,11 +9,13 @@ import click
 from rich.table import Table
 
 from musiq.display import console, summary_table, stats_table
-from musiq.downloader import handle_url, handle_search_selection, _ytm_download
+from musiq.downloader import handle_url, handle_search_selection, process_track, _ytm_download
 from musiq.duplicates import dedupe
 from musiq.history import get_all_downloads, clear_downloads, get_stats
 from musiq.itunes import search_itunes
 from musiq.tagger import read_id3_tags, rewrite_id3_tags
+from musiq import navidrome
+from musiq.spotify import resolve_playlist_tracks
 
 
 @click.group()
@@ -49,6 +51,176 @@ def download(url: str, no_itunes: bool, dry_run: bool, force: bool, workers: int
     )
     if d + s + f > 0:
         console.print(summary_table(results))
+
+
+@cli.command("playlist")
+@click.argument("url")
+@click.option("--no-itunes", is_flag=True, help="Skip iTunes metadata lookup")
+@click.option("--dry-run", is_flag=True, help="Show what would download without fetching")
+@click.option("--force", is_flag=True, help="Re-download even if already in history")
+def playlist(url: str, no_itunes: bool, dry_run: bool, force: bool):
+    """Download every track in a Spotify playlist and create a matching Navidrome playlist."""
+    from musiq.spotify import extract_id_and_type
+
+    kind, sid = extract_id_and_type(url)
+    if kind != "playlist":
+        console.print(f"[red]✖ Expected a playlist URL, got {kind}[/red]")
+        raise SystemExit(1)
+
+    console.print(f"[bold]Fetching playlist:[/bold] {url}")
+    try:
+        playlist_info = resolve_playlist_tracks(url)
+    except Exception as exc:
+        console.print(f"[red]✖ Could not fetch playlist: {exc}[/red]")
+        raise SystemExit(1)
+
+    if playlist_info is None:
+        console.print("[red]✖ Could not fetch playlist or it is empty[/red]")
+        raise SystemExit(1)
+
+    playlist_name, tracks = playlist_info
+    console.print(f"[dim]'{playlist_name}' — {len(tracks)} track(s)[/dim]")
+
+    if dry_run:
+        console.print(f"\n[bold]Would download {len(tracks)} track(s):[/bold]")
+        for t in tracks:
+            a = ", ".join(t.get("artists", [])) or t.get("artist", "?")
+            console.print(f"  [cyan]{t.get('title', '?')}[/cyan] — {a}")
+        return
+
+    results: list[dict] = []
+    for i, track in enumerate(tracks, 1):
+        console.print(f"\n[bold]({i}/{len(tracks)})[/bold]", end=" ")
+        r = process_track(track, no_itunes=no_itunes, dry_run=False, force=force)
+        results.append(r)
+
+    d = sum(1 for r in results if r.get("status") == "downloaded")
+    s = sum(1 for r in results if r.get("status") == "skipped")
+    f = sum(1 for r in results if r.get("status") == "failed")
+
+    # Tracks that are present in the library (downloaded now or already present)
+    # are eligible for the Navidrome playlist. Failed tracks are excluded.
+    eligible = [
+        (track, r)
+        for track, r in zip(tracks, results)
+        if r.get("status") in ("downloaded", "skipped")
+    ]
+    failed_tracks = [
+        (track, r)
+        for track, r in zip(tracks, results)
+        if r.get("status") == "failed"
+    ]
+
+    if d + s + f > 0:
+        console.print(
+            f"\n[bold]Downloads:[/bold] [green]{d} downloaded[/green], "
+            f"[yellow]{s} skipped[/yellow], [red]{f} failed[/red]"
+        )
+        console.print(summary_table(results))
+
+    # ── Navidrome playlist ────────────────────────────────────────
+    nd = navidrome.ensure_navidrome_config()
+    if nd is None:
+        console.print("[yellow]Skipping Navidrome playlist — no config[/yellow]")
+        return
+    base_url, user, password = nd
+
+    if not eligible:
+        console.print("[yellow]No tracks to add to Navidrome playlist — skipping[/yellow]")
+        return
+
+    console.print("[bold]Scanning Navidrome library...[/bold]")
+    if not navidrome.start_scan(base_url, user, password):
+        console.print("[yellow]⚠ Skipping Navidrome playlist — scan could not start[/yellow]")
+        return
+    navidrome.wait_for_scan(base_url, user, password)
+
+    matched_ids: list[str] = []
+    unmatched: list[str] = []
+    for track, _r in eligible:
+        title = track.get("title", "")
+        artist = ", ".join(track.get("artists", [])) or track.get("artist", "")
+        query = f"{title} {artist}".strip()
+        if not query:
+            unmatched.append(f"{title} (no metadata)")
+            continue
+        hits = navidrome.search3(base_url, user, password, query)
+        song_id = _best_song_match(hits, title, artist)
+        if song_id:
+            matched_ids.append(song_id)
+        else:
+            unmatched.append(f"{title} — {artist}")
+            console.print(f"  [yellow]⚠ Not matched in Navidrome:[/yellow] {title} — {artist}")
+
+    if not matched_ids:
+        console.print("[yellow]No tracks matched in Navidrome — playlist not created[/yellow]")
+        return
+
+    existing_id = _find_playlist_by_name(base_url, user, password, playlist_name)
+    if existing_id:
+        console.print(f"[bold]Updating existing playlist:[/bold] {playlist_name}")
+        if navidrome.update_playlist(base_url, user, password, existing_id, matched_ids):
+            console.print(f"[green]✓ Playlist updated:[/green] {playlist_name} ({len(matched_ids)} tracks)")
+        else:
+            console.print(f"[red]✖ Failed to update playlist[/red]")
+    else:
+        console.print(f"[bold]Creating playlist:[/bold] {playlist_name}")
+        pl_id = navidrome.create_playlist(base_url, user, password, playlist_name, matched_ids)
+        if pl_id:
+            console.print(f"[green]✓ Playlist created:[/green] {playlist_name} ({len(matched_ids)} tracks)")
+        else:
+            console.print(f"[red]✖ Failed to create playlist[/red]")
+
+    if unmatched:
+        console.print(f"[yellow]Skipped {len(unmatched)} track(s) not matched in Navidrome:[/yellow]")
+        for name in unmatched:
+            console.print(f"  [dim]• {name}[/dim]")
+    if failed_tracks:
+        console.print(f"[yellow]{len(failed_tracks)} track(s) failed to download and were not added:[/yellow]")
+        for track, _r in failed_tracks:
+            console.print(f"  [dim]• {track.get('title', '?')}[/dim]")
+
+
+def _find_playlist_by_name(base_url: str, user: str, password: str, name: str) -> str | None:
+    """Return the ID of an existing Navidrome playlist matching *name*, or None."""
+    playlists = navidrome.get_playlists(base_url, user, password)
+    for pl in playlists:
+        if pl.get("name", "").lower() == name.lower():
+            return pl.get("id")
+    return None
+
+
+def _best_song_match(hits: list[dict], title: str, artist: str) -> str | None:
+    """Pick the best Navidrome song ID from search hits. Returns None if nothing is close enough."""
+    if not hits:
+        return None
+
+    title_l = title.lower().strip()
+    artist_l = artist.lower().strip()
+
+    def _score(hit: dict) -> int:
+        score = 0
+        h_title = (hit.get("title") or "").lower().strip()
+        h_artist = (hit.get("artist") or hit.get("albumArtist") or "").lower().strip()
+        if h_title == title_l:
+            score += 10
+        elif title_l in h_title or h_title in title_l:
+            score += 5
+        if h_artist and artist_l:
+            if h_artist == artist_l:
+                score += 10
+            elif artist_l in h_artist or h_artist in artist_l:
+                score += 5
+            for part in artist_l.split(","):
+                part = part.strip()
+                if part and part in h_artist:
+                    score += 3
+        return score
+
+    best = max(hits, key=_score)
+    if _score(best) >= 10:
+        return best.get("id")
+    return None
 
 
 @cli.command()

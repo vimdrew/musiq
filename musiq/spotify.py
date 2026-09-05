@@ -1,8 +1,14 @@
+import base64
+import hashlib
+import http.server
 import json
 import os
 import re
+import secrets
 import time
+import webbrowser
 from pathlib import Path
+from urllib.parse import urlencode, urlparse, parse_qs
 
 import requests
 from bs4 import BeautifulSoup
@@ -13,6 +19,12 @@ EMBED_BASE = "https://open.spotify.com/embed"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
 }
+
+# Redirect URI for the Authorization Code + PKCE flow. This must be registered
+# as a redirect URI in the Spotify Developer Dashboard for this client.
+_REDIRECT_HOST = "127.0.0.1"
+_REDIRECT_PORT = 8888
+_PLAYLIST_SCOPES = "playlist-read-private playlist-read-collaborative"
 
 
 class SpotifyError(Exception):
@@ -39,6 +51,219 @@ def _load_env_fallback() -> tuple[str | None, str | None]:
         except OSError:
             pass
     return client_id, client_secret
+
+
+# ── Config read/write helpers ─────────────────────────────────────
+
+def _read_config_value(key: str) -> str | None:
+    """Read a single KEY=value from ~/.musiq/config, or the env var of the same name."""
+    value = os.environ.get(key)
+    if value:
+        return value.strip()
+    if _CONFIG_PATH.is_file():
+        try:
+            for line in _CONFIG_PATH.read_text().splitlines():
+                line = line.strip()
+                if line.startswith(f"{key}="):
+                    return line.split("=", 1)[1].strip()
+        except OSError:
+            pass
+    return None
+
+
+def _write_config_value(key: str, value: str) -> None:
+    """Set a single KEY=value in ~/.musiq/config, preserving other lines."""
+    _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    if _CONFIG_PATH.is_file():
+        lines = _CONFIG_PATH.read_text().splitlines()
+
+    new_lines = []
+    written = False
+    for line in lines:
+        k = line.split("=", 1)[0] if "=" in line else None
+        if k == key:
+            new_lines.append(f"{key}={value}")
+            written = True
+        else:
+            new_lines.append(line)
+    if not written:
+        new_lines.append(f"{key}={value}")
+
+    _CONFIG_PATH.write_text("\n".join(new_lines) + "\n")
+
+
+# ── Authorization Code + PKCE (playlist reads) ────────────────────
+
+class _AuthCodeHandler(http.server.BaseHTTPRequestHandler):
+    """HTTP handler that captures the auth code from Spotify's redirect."""
+
+    code: str | None = None
+    error: str | None = None
+
+    def do_GET(self):  # noqa: N802
+        query = urlparse(self.path).query
+        params = parse_qs(query)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        if "code" in params:
+            type(self).code = params["code"][0]
+            type(self).error = None
+            body = "<html><body><h3>musiq authorization complete</h3><p>You can close this tab and return to the terminal.</p></body></html>"
+        else:
+            type(self).code = None
+            type(self).error = params.get("error", ["unknown"])[0]
+            body = f"<html><body><h3>Authorization failed</h3><p>{type(self).error}</p></body></html>"
+        self.wfile.write(body.encode())
+
+    def log_message(self, *args):  # noqa: D102
+        pass
+
+
+def _redirect_uri() -> str:
+    """Redirect URI, overridable via SPOTIFY_REDIRECT_URI for testing."""
+    custom = _read_config_value("SPOTIFY_REDIRECT_URI")
+    if custom:
+        return custom
+    return f"http://{_REDIRECT_HOST}:{_REDIRECT_PORT}/callback"
+
+
+def _pkce_pair() -> tuple[str, str]:
+    """Return (code_verifier, code_challenge) for PKCE."""
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode()).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return verifier, challenge
+
+
+def _run_redirect_server() -> tuple[http.server.HTTPServer, type]:
+    """Start a local HTTP server to capture the auth code.
+
+    Returns (server, handler_class). The captured code is stored on the
+    handler class once the browser redirect lands.
+    """
+    handler = type("Handler", (_AuthCodeHandler,), {})
+    server = http.server.HTTPServer((_REDIRECT_HOST, _REDIRECT_PORT), handler)
+    return server, handler
+
+
+def _authorize() -> str:
+    """Run the one-time Authorization Code + PKCE login. Returns the refresh token."""
+    client_id = _read_config_value("SPOTIFY_CLIENT_ID")
+    if not client_id:
+        raise SpotifyError(
+            "SPOTIFY_CLIENT_ID is not configured. Set it in ~/.musiq/config."
+        )
+
+    verifier, challenge = _pkce_pair()
+    redirect_uri = _redirect_uri()
+
+    server, handler_cls = _run_redirect_server()
+
+    params = {
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": _PLAYLIST_SCOPES,
+        "code_challenge_method": "S256",
+        "code_challenge": challenge,
+    }
+    auth_url = "https://accounts.spotify.com/authorize?" + urlencode(params)
+
+    console.print("[bold]Opening Spotify in your browser for authorization...[/bold]")
+    console.print(f"[dim]If the browser doesn't open, visit:\n  {auth_url}[/dim]")
+    console.print(f"[dim]Authorize the app and you'll be redirected back to {redirect_uri}.[/dim]")
+
+    try:
+        webbrowser.open(auth_url)
+    except Exception:
+        pass
+
+    # Wait up to the timeout for the redirect to arrive with the code.
+    try:
+        server.timeout = 1
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            server.handle_request()
+            if handler_cls.code is not None or handler_cls.error is not None:
+                break
+    finally:
+        server.server_close()
+        if handler_cls.error:
+            raise SpotifyError(f"Spotify authorization failed: {handler_cls.error}")
+
+    if handler_cls.code is None:
+        raise SpotifyError("Timed out waiting for Spotify authorization.")
+
+    # Exchange the code for access + refresh tokens. Spotify's token endpoint
+    # can be slow, so use a generous timeout.
+    token_resp = requests.post(
+        "https://accounts.spotify.com/api/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": handler_cls.code,
+            "redirect_uri": redirect_uri,
+            "client_id": client_id,
+            "code_verifier": verifier,
+        },
+        timeout=90,
+    )
+    token_resp.raise_for_status()
+    data = token_resp.json()
+    refresh_token = data.get("refresh_token")
+    if not refresh_token:
+        raise SpotifyError("Spotify did not return a refresh token.")
+    return refresh_token
+
+
+class PlaylistAuth:
+    """Manages an access token for Spotify playlist-read calls via refresh token."""
+
+    def __init__(self):
+        self._access_token: str | None = None
+        self._expires_at = 0.0
+
+    @property
+    def refresh_token(self) -> str | None:
+        return _read_config_value("SPOTIFY_REFRESH_TOKEN")
+
+    def ensure_refresh_token(self) -> str:
+        token = self.refresh_token
+        if not token:
+            token = _authorize()
+            _write_config_value("SPOTIFY_REFRESH_TOKEN", token)
+            console.print("[green]✓ Spotify login complete. Refresh token saved.[/green]")
+        return token
+
+    def _refresh_access_token(self) -> str:
+        client_id = _read_config_value("SPOTIFY_CLIENT_ID")
+        refresh_token = self.ensure_refresh_token()
+        resp = requests.post(
+            "https://accounts.spotify.com/api/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        self._access_token = data["access_token"]
+        self._expires_at = time.time() + data.get("expires_in", 3600) - 60
+        return self._access_token
+
+    def access_token(self) -> str:
+        if self._access_token and time.time() < self._expires_at:
+            return self._access_token
+        return self._refresh_access_token()
+
+    def headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.access_token()}"}
+
+
+_playlist_auth = PlaylistAuth()
 
 
 class SpotifyClient:
@@ -242,7 +467,138 @@ def _api_playlist_to_tracks(data: dict) -> list[dict] | None:
     return results if results else None
 
 
-# ── ID / type extraction ──────────────────────────────────────────
+# ── Playlist fetch (Authorization Code + PKCE) ────────────────────
+
+def resolve_playlist_tracks(url: str) -> tuple[str, list[dict]] | None:
+    """Fetch a Spotify playlist's name and all of its tracks using the user
+    authorized (PKCE) token, paginating through every page (100/page).
+
+    Returns (name, tracks) or None on failure. Requires a one-time browser
+    login if SPOTIFY_REFRESH_TOKEN is not yet stored in config.
+    """
+    kind, sid = extract_id_and_type(url)
+    if kind != "playlist":
+        raise SpotifyError(f"Expected a playlist URL, got {kind}")
+
+    try:
+        return _resolve_playlist_from_api(sid)
+    except Exception as exc:
+        console.print(
+            f"[yellow]⚠ Playlist API unavailable ({exc}) — using embed fallback[/yellow]"
+        )
+        return _resolve_playlist_from_embed(sid)
+
+
+def _resolve_playlist_from_api(sid: str) -> tuple[str, list[dict]]:
+    """Fetch a playlist's name + all tracks via the Spotify API (OAuth token).
+
+    Raises on any failure so the caller can fall back to the embed scraper.
+    """
+    headers = _playlist_auth.headers()
+
+    for attempt in range(2):
+        resp = requests.get(
+            f"https://api.spotify.com/v1/playlists/{sid}",
+            headers=headers,
+            timeout=15,
+        )
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", 60))
+            time.sleep(retry_after)
+            continue
+        resp.raise_for_status()
+        playlist = resp.json()
+        break
+
+    name = playlist.get("name", "Musiq Playlist")
+
+    tracks: list[dict] = []
+    offset = 0
+    limit = 100
+    while True:
+        page_resp = requests.get(
+            f"https://api.spotify.com/v1/playlists/{sid}/tracks",
+            headers=headers,
+            params={"limit": limit, "offset": offset},
+            timeout=15,
+        )
+        page_resp.raise_for_status()
+        data = page_resp.json()
+        items = data.get("items", [])
+        page = _api_playlist_to_tracks({"tracks": {"items": items}})
+        if page:
+            tracks.extend(page)
+        if len(items) < limit or data.get("total", 0) <= offset + len(items):
+            break
+        offset += limit
+
+    console.print("[dim][spotify] playlist via API[/dim]")
+    return name, tracks
+
+
+def _resolve_playlist_from_embed(sid: str) -> tuple[str, list[dict]]:
+    """Fetch a playlist's name + tracks from the Spotify embed page.
+
+    Used when the API is unavailable (e.g. premium gate on the developer app).
+    The embed page exposes the playlist's track list but no album per track and
+    no pagination, so albums are enriched via the iTunes metadata lookup that
+    the rest of the pipeline already uses, and the result is cached as
+    _itunes_cache so process_track reuses it instead of looking it up again.
+    """
+    data = fetch_next_data("playlist", sid)
+    entity = (
+        _navigate_entity(data)
+        or data.get("props", {})
+        .get("pageProps", {})
+        .get("state", {})
+        .get("data", {})
+        .get("entity", {})
+    )
+    if not isinstance(entity, dict):
+        raise SpotifyError("playlist entity not found in embed page")
+
+    name = entity.get("name") or entity.get("title") or "Musiq Playlist"
+    track_list = entity.get("trackList") or []
+
+    from musiq.itunes import fetch_metadata
+
+    results = []
+    for entry in track_list:
+        if not isinstance(entry, dict):
+            continue
+        track_id = entry.get("uri", "").split(":")[-1] or entry.get("uid", "")
+        if not track_id:
+            continue
+        title = entry.get("title", "")
+        artist = entry.get("subtitle", "")
+        artists = [artist] if artist else []
+        itunes_meta = fetch_metadata(artist, title)
+        track = {
+            "id": track_id,
+            "title": title,
+            "artist": artist,
+            "artists": artists,
+            "album": itunes_meta.get("album") or "",
+            "track_number": 0,
+            "duration_ms": entry.get("duration", 0) or 0,
+            "cover_url": itunes_meta.get("artwork_url") or "",
+            "year": itunes_meta.get("year") or "",
+            "release_date": "",
+            "explicit": entry.get("isExplicit", False),
+            "_source_type": "playlist",
+        }
+        if itunes_meta:
+            track["_itunes_cache"] = itunes_meta
+        results.append(track)
+
+    if not results:
+        raise SpotifyError("no tracks found in playlist embed page")
+
+    console.print(f"[dim][spotify] playlist via embed (first {len(results)} tracks)[/dim]")
+    return name, results
+
+
+
 
 def extract_id_and_type(url: str) -> tuple[str, str]:
     m = re.search(r"spotify\.com/(track|album|playlist)/([A-Za-z0-9]+)", url)
