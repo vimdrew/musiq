@@ -7,6 +7,7 @@ import re
 import secrets
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qs
 
@@ -537,13 +538,17 @@ def _resolve_playlist_from_api(sid: str) -> tuple[str, list[dict]]:
 
 
 def _resolve_playlist_from_embed(sid: str) -> tuple[str, list[dict]]:
-    """Fetch a playlist's name + tracks from the Spotify embed page.
+    """Fetch a playlist's name + full track list from the embed page.
 
-    Used when the API is unavailable (e.g. premium gate on the developer app).
-    The embed page exposes the playlist's track list but no album per track and
-    no pagination, so albums are enriched via the iTunes metadata lookup that
-    the rest of the pipeline already uses, and the result is cached as
-    _itunes_cache so process_track reuses it instead of looking it up again.
+    Used when the API is unavailable (e.g. premium gate on the developer
+    app). The embed page's own trackList preview is capped (~100 tracks),
+    so this tries to go beyond that using the anonymous web-player token
+    embedded in the page: that token grants access to Spotify's internal
+    spclient playlist endpoint, which returns the authoritative full list.
+    Tracks beyond the preview need their own embed fetches for title/artist.
+    The old preview-only path is kept as a last resort. Albums come from
+    the iTunes metadata lookup the rest of the pipeline already uses, and
+    the result is cached as _itunes_cache so process_track reuses it.
     """
     data = fetch_next_data("playlist", sid)
     entity = (
@@ -558,44 +563,131 @@ def _resolve_playlist_from_embed(sid: str) -> tuple[str, list[dict]]:
         raise SpotifyError("playlist entity not found in embed page")
 
     name = entity.get("name") or entity.get("title") or "Musiq Playlist"
-    track_list = entity.get("trackList") or []
+    preview = entity.get("trackList") or []
 
-    from musiq.itunes import fetch_metadata
-
-    results = []
-    for entry in track_list:
+    preview_by_id: dict[str, dict] = {}
+    for entry in preview:
         if not isinstance(entry, dict):
             continue
-        track_id = entry.get("uri", "").split(":")[-1] or entry.get("uid", "")
-        if not track_id:
-            continue
-        title = entry.get("title", "")
-        artist = entry.get("subtitle", "")
-        artists = [artist] if artist else []
-        itunes_meta = fetch_metadata(artist, title)
-        track = {
-            "id": track_id,
-            "title": title,
-            "artist": artist,
-            "artists": artists,
-            "album": itunes_meta.get("album") or "",
-            "track_number": 0,
-            "duration_ms": entry.get("duration", 0) or 0,
-            "cover_url": itunes_meta.get("artwork_url") or "",
-            "year": itunes_meta.get("year") or "",
-            "release_date": "",
-            "explicit": entry.get("isExplicit", False),
-            "_source_type": "playlist",
-        }
-        if itunes_meta:
-            track["_itunes_cache"] = itunes_meta
-        results.append(track)
+        tid = entry.get("uri", "").split(":")[-1] or entry.get("uid", "")
+        if tid:
+            preview_by_id[tid] = entry
+
+    try:
+        session = _embed_session(data)
+        if not session or not session.get("accessToken"):
+            raise SpotifyError("no anonymous access token in embed page")
+        total, uris = _spclient_track_uris(sid, session["accessToken"])
+    except Exception as exc:
+        return _build_preview_only(preview, name, exc)
+
+    track_ids = [uri.split(":")[-1] for uri in uris if uri.startswith("spotify:track:")]
+
+    missing = [tid for tid in track_ids if tid not in preview_by_id]
+    missing_meta: dict[str, dict | None] = {}
+    if missing:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futures = {ex.submit(_track_embed_metadata, tid): tid for tid in missing}
+            for fut in as_completed(futures):
+                missing_meta[futures[fut]] = fut.result()
+
+    results: list[dict] = []
+    for tid in track_ids:
+        entry = preview_by_id.get(tid)
+        if entry is not None:
+            track = _make_playlist_track(
+                tid,
+                entry.get("title", ""),
+                entry.get("subtitle", ""),
+                entry.get("duration", 0) or 0,
+                entry.get("isExplicit", False),
+            )
+        else:
+            meta = missing_meta.get(tid) or {}
+            track = _make_playlist_track(
+                tid,
+                meta.get("title") or "Unknown",
+                meta.get("artist") or "",
+                meta.get("duration_ms") or 0,
+                False,
+            )
+        if track:
+            results.append(track)
 
     if not results:
         raise SpotifyError("no tracks found in playlist embed page")
 
-    console.print(f"[dim][spotify] playlist via embed (first {len(results)} tracks)[/dim]")
+    console.print(
+        f"[dim][spotify] playlist via embed + spclient ({len(results)}/{total} tracks)[/dim]"
+    )
     return name, results
+
+
+def _build_preview_only(preview: list, name: str, exc: Exception) -> tuple[str, list[dict]]:
+    """Last-resort path: return just the embed page's truncated preview.
+
+    Used when the anonymous token or the spclient call fails for any reason
+    (e.g. Spotify changed the page structure). Logs a clear truncation
+    warning so a silently shortened list is impossible to miss.
+    """
+    results = []
+    for entry in preview:
+        if not isinstance(entry, dict):
+            continue
+        tid = entry.get("uri", "").split(":")[-1] or entry.get("uid", "")
+        if not tid:
+            continue
+        track = _make_playlist_track(
+            tid,
+            entry.get("title", ""),
+            entry.get("subtitle", ""),
+            entry.get("duration", 0) or 0,
+            entry.get("isExplicit", False),
+        )
+        if track:
+            results.append(track)
+
+    if not results:
+        raise SpotifyError("no tracks found in playlist embed page") from exc
+
+    console.print(
+        f"[yellow]⚠ Full playlist fetch unavailable ({exc}) — "
+        f"embed preview truncated at {len(results)} track(s)[/yellow]"
+    )
+    console.print(f"[dim][spotify] playlist via embed ({len(results)} tracks)[/dim]")
+    return name, results
+
+
+def _make_playlist_track(
+    track_id: str, title: str, artist: str, duration_ms: int, explicit: bool
+) -> dict | None:
+    """Build a pipeline track dict from embed-derived metadata, enriched
+    with album info from iTunes (cached as _itunes_cache)."""
+    if not track_id or not title:
+        return None
+    from musiq.itunes import fetch_metadata
+
+    artists = [artist] if artist else []
+    itunes_meta = {}
+    if title != "Unknown" and artist:
+        itunes_meta = fetch_metadata(artist, title)
+    track = {
+        "id": track_id,
+        "title": title,
+        "artist": artist,
+        "artists": artists,
+        "album": itunes_meta.get("album") or "",
+        "track_number": 0,
+        "duration_ms": int(duration_ms or 0),
+        "cover_url": itunes_meta.get("artwork_url") or "",
+        "year": itunes_meta.get("year") or "",
+        "release_date": "",
+        "explicit": bool(explicit),
+        "_source_type": "playlist",
+    }
+    if itunes_meta:
+        track["_itunes_cache"] = itunes_meta
+    return track
 
 
 
@@ -622,6 +714,135 @@ def fetch_next_data(kind: str, spotify_id: str) -> dict:
     if not tag or not tag.string:
         raise SpotifyError("__NEXT_DATA__ script tag not found in embed page")
     return json.loads(tag.string)
+
+
+# ── Anonymous token + spclient (full playlist fetch) ──────────────
+
+_SPCLIENT_PLAYLIST_URL = "https://spclient.wg.spotify.com/playlist/v2/playlist/{sid}"
+
+
+def _embed_session(data: dict) -> dict | None:
+    """Return the anonymous web-player session dict from an embed page's
+    __NEXT_DATA__ (contains 'accessToken'), or None if absent. The token
+    powers the public, logged-out embed player and stays valid ~1 hour."""
+    if not isinstance(data, dict):
+        return None
+    if "accessToken" in data:
+        return data
+    for value in data.values():
+        if isinstance(value, dict):
+            hit = _embed_session(value)
+            if hit is not None:
+                return hit
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    hit = _embed_session(item)
+                    if hit is not None:
+                        return hit
+    return None
+
+
+def _spclient_track_uris(sid: str, token: str) -> tuple[int, list[str]]:
+    """Fetch the full ordered playlist track list from Spotify's internal
+    spclient API, using the anonymous token from the embed page.
+
+    Returns (total, uris): ``total`` is the authoritative playlist size and
+    ``uris`` the full list in playlist order. Today the endpoint returns the
+    whole list in a single response and ignores offset/limit; the loop is
+    kept as resilience and pages via the 'from' parameter if a future
+    response is ever truncated. Raises SpotifyError on any failure so the
+    caller can fall back to the truncated embed preview.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "app-platform": "WebPlayer",
+        "User-Agent": HEADERS["User-Agent"],
+    }
+    url = _SPCLIENT_PLAYLIST_URL.format(sid=sid)
+
+    uris: list[str] = []
+    total = 0
+    offset = 0
+    for _page in range(300):
+        params = {"from": offset} if offset else None
+        resp = None
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, headers=headers, params=params, timeout=60)
+            except requests.RequestException as exc:
+                if attempt == 2:
+                    raise SpotifyError(f"spclient request failed: {exc}") from exc
+                time.sleep(2 * (attempt + 1))
+                continue
+            if resp.status_code == 429:
+                time.sleep(int(resp.headers.get("Retry-After", 30)))
+                continue
+            break
+        if resp is None:
+            raise SpotifyError("spclient request failed after retries")
+        if resp.status_code != 200:
+            raise SpotifyError(f"spclient returned HTTP {resp.status_code}")
+
+        data = resp.json()
+        total = int(data.get("length") or 0)
+        contents = data.get("contents") or {}
+        items = contents.get("items") or []
+        page_uris = [
+            str(item.get("uri", ""))
+            for item in items
+            if isinstance(item, dict)
+            and str(item.get("uri", "")).startswith("spotify:track:")
+        ]
+        if not page_uris:
+            raise SpotifyError("spclient returned no tracks")
+        seen = set(uris)
+        uris.extend(u for u in page_uris if u not in seen)
+        offset += len(page_uris)
+        if len(uris) >= total:
+            break
+
+    if not uris:
+        raise SpotifyError("spclient returned no tracks")
+    return total, uris
+
+
+def _track_embed_metadata(track_id: str) -> dict | None:
+    """Fetch a track's metadata (title, artist, duration) from its own embed
+    page. Used for tracks beyond the playlist embed preview, which spclient
+    reports only as URIs. Returns None only after retries are exhausted
+    (transient failures shouldn't silently drop a track)."""
+    for attempt in range(3):
+        try:
+            data = fetch_next_data("track", track_id)
+            entity = _navigate_entity(data)
+            if entity is None:
+                return None
+            break
+        except Exception:
+            if attempt == 2:
+                return None
+            time.sleep(1.5 * (attempt + 1))
+
+    title = entity.get("name") or entity.get("title") or ""
+    if not title:
+        return None
+    artists = entity.get("artists") or []
+    if isinstance(artists, list):
+        artist = ", ".join(
+            str(a.get("name", ""))
+            for a in artists
+            if isinstance(a, dict) and a.get("name")
+        )
+    else:
+        artist = entity.get("subtitle") or ""
+    duration = entity.get("duration") or 0
+    return {
+        "title": title,
+        "artist": artist,
+        "duration_ms": int(duration) if duration else 0,
+    }
 
 
 # ── Track ─────────────────────────────────────────────────────────
