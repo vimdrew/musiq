@@ -46,17 +46,22 @@ def get_conn() -> sqlite3.Connection:
 
 
 def track_exists(spotify_id: str) -> bool:
+    fp = get_file_path(spotify_id)
+    return bool(fp and Path(fp).exists())
+
+
+def get_file_path(spotify_id: str) -> str | None:
+    """Return the stored file_path for a spotify_id, or None if no row exists."""
     with _lock:
         conn = get_conn()
-        cur = conn.execute("SELECT file_path FROM downloads WHERE spotify_id = ?", (spotify_id,))
+        cur = conn.execute(
+            "SELECT file_path FROM downloads WHERE spotify_id = ?", (spotify_id,)
+        )
         row = cur.fetchone()
         conn.close()
     if row is None:
-        return False
-    file_path = row[0]
-    if not file_path:
-        return False
-    return Path(file_path).exists()
+        return None
+    return row[0]
 
 
 def add_download(spotify_id: str, title: str, artist: str, album: str | None, file_path: str | None):

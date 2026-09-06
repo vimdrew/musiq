@@ -11,9 +11,9 @@ from rich.table import Table
 from musiq.display import console, summary_table, stats_table
 from musiq.downloader import handle_url, handle_search_selection, process_track, _ytm_download
 from musiq.duplicates import dedupe
-from musiq.history import get_all_downloads, clear_downloads, get_stats
+from musiq.history import get_all_downloads, clear_downloads, get_stats, get_file_path
 from musiq.itunes import search_itunes
-from musiq.tagger import read_id3_tags, rewrite_id3_tags
+from musiq.tagger import read_id3_tags, rewrite_id3_tags, fetch_cover_image
 from musiq import navidrome
 from musiq.spotify import resolve_playlist_tracks
 
@@ -179,6 +179,91 @@ def playlist(url: str, no_itunes: bool, dry_run: bool, force: bool):
         console.print(f"[yellow]{len(failed_tracks)} track(s) failed to download and were not added:[/yellow]")
         for track, _r in failed_tracks:
             console.print(f"  [dim]• {track.get('title', '?')}[/dim]")
+
+
+@cli.command("retag-playlist")
+@click.argument("url")
+def retag_playlist(url: str):
+    """Re-apply corrected metadata (cover art, year) to tracks already
+    downloaded from a Spotify playlist, matching them via history.db."""
+    from musiq.spotify import extract_id_and_type
+
+    kind, sid = extract_id_and_type(url)
+    if kind != "playlist":
+        console.print(f"[red]✖ Expected a playlist URL, got {kind}[/red]")
+        raise SystemExit(1)
+
+    console.print(f"[bold]Fetching playlist:[/bold] {url}")
+    try:
+        playlist_info = resolve_playlist_tracks(url)
+    except Exception as exc:
+        console.print(f"[red]✖ Could not fetch playlist: {exc}[/red]")
+        raise SystemExit(1)
+
+    if playlist_info is None:
+        console.print("[red]✖ Could not fetch playlist[/red]")
+        raise SystemExit(1)
+
+    playlist_name, tracks = playlist_info
+    console.print(f"[dim]'{playlist_name}' — {len(tracks)} track(s)[/dim]")
+
+    retagged: list[str] = []
+    skipped_missing: list[str] = []
+    no_history: list[str] = []
+
+    for track in tracks:
+        sid = track.get("id", "")
+        title = track.get("title", "?")
+        artist = ", ".join(track.get("artists", [])) or track.get("artist", "")
+        label = f"{title} — {artist}"
+
+        file_path = get_file_path(sid) if sid else None
+        if not file_path:
+            no_history.append(label)
+            continue
+
+        path = Path(file_path)
+        if not path.is_file():
+            skipped_missing.append(label)
+            continue
+
+        tags = read_id3_tags(path)
+        if not tags:
+            skipped_missing.append(f"{label} (no ID3 tags)")
+            continue
+
+        year = track.get("year")
+        if year:
+            tags["year"] = str(year)
+        if track.get("album_artist"):
+            tags["album_artist"] = track["album_artist"]
+        if track.get("artist"):
+            tags.setdefault("artist", track["artist"])
+        if track.get("artists"):
+            tags["artists"] = track["artists"]
+        if track.get("album"):
+            tags.setdefault("album", track["album"])
+
+        cover_url = track.get("cover_url")
+        if cover_url:
+            img = fetch_cover_image(cover_url)
+            if img:
+                tags["images"] = [img]
+
+        try:
+            rewrite_id3_tags(path, tags)
+        except Exception as exc:
+            console.print(f"  [red]✖ Failed to retag {label}: {exc}[/red]")
+            continue
+
+        retagged.append(label)
+        console.print(f"  [green]✓ Retagged:[/green] {label}")
+
+    console.print(
+        f"\n[bold]Summary:[/bold] [green]{len(retagged)} retagged[/green], "
+        f"[yellow]{len(skipped_missing)} skipped (file missing)[/yellow], "
+        f"[red]{len(no_history)} no history entry[/red]"
+    )
 
 
 def _find_playlist_by_name(base_url: str, user: str, password: str, name: str) -> str | None:

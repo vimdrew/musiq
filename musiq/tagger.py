@@ -20,6 +20,28 @@ def normalise_genre(genre: str) -> str:
     return GENRE_MAP.get(genre, genre)
 
 
+def fetch_cover_image(cover_url: str) -> dict | None:
+    """Download a cover URL into a dict usable as a rewrite_id3_tags image.
+
+    Returns {'picture_type', 'image_data', 'mime_type', 'description'} or
+    None if the image can't be fetched.
+    """
+    if not cover_url:
+        return None
+    try:
+        resp = requests.get(cover_url, timeout=10)
+        if resp.status_code != 200:
+            return None
+        return {
+            "picture_type": 3,
+            "image_data": resp.content,
+            "mime_type": resp.headers.get("content-type", "image/jpeg"),
+            "description": "",
+        }
+    except Exception:
+        return None
+
+
 def _set_artist_frames(tag, artists) -> None:
     """Write TPE1 as a multi-value field (one frame per artist)."""
     if isinstance(artists, str):
@@ -65,12 +87,14 @@ def tag_file(
                 pass
 
         if cover_url:
-            try:
-                resp = requests.get(cover_url, timeout=10)
-                if resp.status_code == 200:
-                    audio.tag.images.set(3, resp.content, resp.headers.get("content-type", "image/jpeg"))
-            except Exception:
-                pass
+            img = fetch_cover_image(cover_url)
+            if img:
+                audio.tag.images.set(
+                    img["picture_type"],
+                    img["image_data"],
+                    img["mime_type"],
+                    description=img.get("description", ""),
+                )
 
         audio.tag.save(encoding="utf-8")
     except Exception as exc:
