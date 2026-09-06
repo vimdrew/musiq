@@ -565,6 +565,15 @@ def _resolve_playlist_from_embed(sid: str) -> tuple[str, list[dict]]:
     name = entity.get("name") or entity.get("title") or "Musiq Playlist"
     preview = entity.get("trackList") or []
 
+    playlist_cover = ""
+    vi = entity.get("visualIdentity") or {}
+    if isinstance(vi, dict):
+        images = vi.get("image") or []
+        if images:
+            playlist_cover = max(
+                images, key=lambda x: x.get("maxWidth", 0) * x.get("maxHeight", 0)
+            ).get("url", "")
+
     preview_by_id: dict[str, dict] = {}
     for entry in preview:
         if not isinstance(entry, dict):
@@ -579,7 +588,7 @@ def _resolve_playlist_from_embed(sid: str) -> tuple[str, list[dict]]:
             raise SpotifyError("no anonymous access token in embed page")
         total, uris = _spclient_track_uris(sid, session["accessToken"])
     except Exception as exc:
-        return _build_preview_only(preview, name, exc)
+        return _build_preview_only(preview, name, exc, playlist_cover=playlist_cover)
 
     track_ids = [uri.split(":")[-1] for uri in uris if uri.startswith("spotify:track:")]
 
@@ -601,6 +610,7 @@ def _resolve_playlist_from_embed(sid: str) -> tuple[str, list[dict]]:
                 entry.get("subtitle", ""),
                 entry.get("duration", 0) or 0,
                 entry.get("isExplicit", False),
+                cover_url=playlist_cover,
             )
         else:
             meta = missing_meta.get(tid) or {}
@@ -610,6 +620,8 @@ def _resolve_playlist_from_embed(sid: str) -> tuple[str, list[dict]]:
                 meta.get("artist") or "",
                 meta.get("duration_ms") or 0,
                 False,
+                cover_url=meta.get("cover_url", ""),
+                year=meta.get("year", ""),
             )
         if track:
             results.append(track)
@@ -623,7 +635,8 @@ def _resolve_playlist_from_embed(sid: str) -> tuple[str, list[dict]]:
     return name, results
 
 
-def _build_preview_only(preview: list, name: str, exc: Exception) -> tuple[str, list[dict]]:
+def _build_preview_only(preview: list, name: str, exc: Exception,
+                        playlist_cover: str = "") -> tuple[str, list[dict]]:
     """Last-resort path: return just the embed page's truncated preview.
 
     Used when the anonymous token or the spclient call fails for any reason
@@ -643,6 +656,7 @@ def _build_preview_only(preview: list, name: str, exc: Exception) -> tuple[str, 
             entry.get("subtitle", ""),
             entry.get("duration", 0) or 0,
             entry.get("isExplicit", False),
+            cover_url=playlist_cover,
         )
         if track:
             results.append(track)
@@ -659,7 +673,8 @@ def _build_preview_only(preview: list, name: str, exc: Exception) -> tuple[str, 
 
 
 def _make_playlist_track(
-    track_id: str, title: str, artist: str, duration_ms: int, explicit: bool
+    track_id: str, title: str, artist: str, duration_ms: int, explicit: bool,
+    cover_url: str = "", year: str = "",
 ) -> dict | None:
     """Build a pipeline track dict from embed-derived metadata, enriched
     with album info from iTunes (cached as _itunes_cache)."""
@@ -679,8 +694,8 @@ def _make_playlist_track(
         "album": itunes_meta.get("album") or "",
         "track_number": 0,
         "duration_ms": int(duration_ms or 0),
-        "cover_url": itunes_meta.get("artwork_url") or "",
-        "year": itunes_meta.get("year") or "",
+        "cover_url": cover_url or itunes_meta.get("artwork_url") or "",
+        "year": year or itunes_meta.get("year") or "",
         "release_date": "",
         "explicit": bool(explicit),
         "_source_type": "playlist",
@@ -838,10 +853,29 @@ def _track_embed_metadata(track_id: str) -> dict | None:
     else:
         artist = entity.get("subtitle") or ""
     duration = entity.get("duration") or 0
+
+    cover_url = ""
+    vi = entity.get("visualIdentity")
+    if isinstance(vi, dict):
+        images = vi.get("image") or []
+        if images:
+            cover_url = max(
+                images, key=lambda x: x.get("maxWidth", 0) * x.get("maxHeight", 0)
+            ).get("url", "")
+
+    year = ""
+    release = entity.get("releaseDate") or {}
+    if isinstance(release, dict):
+        iso = release.get("isoString") or ""
+        if iso and len(iso) >= 4:
+            year = iso[:4]
+
     return {
         "title": title,
         "artist": artist,
         "duration_ms": int(duration) if duration else 0,
+        "cover_url": cover_url,
+        "year": year,
     }
 
 
