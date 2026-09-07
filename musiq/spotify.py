@@ -592,37 +592,38 @@ def _resolve_playlist_from_embed(sid: str) -> tuple[str, list[dict]]:
 
     track_ids = [uri.split(":")[-1] for uri in uris if uri.startswith("spotify:track:")]
 
-    missing = [tid for tid in track_ids if tid not in preview_by_id]
-    missing_meta: dict[str, dict | None] = {}
-    if missing:
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            futures = {ex.submit(_track_embed_metadata, tid): tid for tid in missing}
-            for fut in as_completed(futures):
-                missing_meta[futures[fut]] = fut.result()
+    # Fetch individual per-track metadata (title/artist/duration plus each
+    # song's own cover art and year) for EVERY track — preview-range and
+    # beyond — so each song gets its own artwork, matching album downloads.
+    # Threaded 4-wide with retries handled inside _track_embed_metadata.
+    meta_by_id: dict[str, dict | None] = {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = {ex.submit(_track_embed_metadata, tid): tid for tid in track_ids}
+        for fut in as_completed(futures):
+            meta_by_id[futures[fut]] = fut.result()
 
     results: list[dict] = []
     for tid in track_ids:
         entry = preview_by_id.get(tid)
-        if entry is not None:
-            track = _make_playlist_track(
-                tid,
-                entry.get("title", ""),
-                entry.get("subtitle", ""),
-                entry.get("duration", 0) or 0,
-                entry.get("isExplicit", False),
-                cover_url=playlist_cover,
-            )
-        else:
-            meta = missing_meta.get(tid) or {}
-            track = _make_playlist_track(
-                tid,
-                meta.get("title") or "Unknown",
-                meta.get("artist") or "",
-                meta.get("duration_ms") or 0,
-                False,
-                cover_url=meta.get("cover_url", ""),
-                year=meta.get("year", ""),
-            )
+        meta = meta_by_id.get(tid) or {}
+        # Prefer the track's own embed metadata, falling back to the preview
+        # entry for title/artist when the per-track fetch is unavailable.
+        title = meta.get("title") or (entry.get("title", "") if entry else "") or "Unknown"
+        artist = meta.get("artist") or (entry.get("subtitle", "") if entry else "")
+        duration_ms = meta.get("duration_ms") or (entry.get("duration", 0) if entry else 0) or 0
+        explicit = bool((entry or {}).get("isExplicit", False))
+        # Individual cover art wins; the shared playlist cover is only a
+        # last resort if this track's own embed fetch yielded no art.
+        cover = meta.get("cover_url") or playlist_cover
+        track = _make_playlist_track(
+            tid,
+            title,
+            artist,
+            duration_ms,
+            explicit,
+            cover_url=cover,
+            year=meta.get("year", ""),
+        )
         if track:
             results.append(track)
 
@@ -643,20 +644,35 @@ def _build_preview_only(preview: list, name: str, exc: Exception,
     (e.g. Spotify changed the page structure). Logs a clear truncation
     warning so a silently shortened list is impossible to miss.
     """
+    entries = [e for e in preview if isinstance(e, dict)]
+    tids = [
+        e.get("uri", "").split(":")[-1] or e.get("uid", "")
+        for e in entries
+    ]
+    tids = [t for t in tids if t]
+
+    meta_by_id: dict[str, dict | None] = {}
+    if tids:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futures = {ex.submit(_track_embed_metadata, tid): tid for tid in tids}
+            for fut in as_completed(futures):
+                meta_by_id[futures[fut]] = fut.result()
+
     results = []
-    for entry in preview:
-        if not isinstance(entry, dict):
-            continue
-        tid = entry.get("uri", "").split(":")[-1] or entry.get("uid", "")
-        if not tid:
-            continue
+    for entry, tid in zip(entries, tids):
+        meta = meta_by_id.get(tid) or {}
+        title = meta.get("title") or entry.get("title", "")
+        artist = meta.get("artist") or entry.get("subtitle", "")
+        duration_ms = meta.get("duration_ms") or entry.get("duration", 0) or 0
+        cover = meta.get("cover_url") or playlist_cover
         track = _make_playlist_track(
             tid,
-            entry.get("title", ""),
-            entry.get("subtitle", ""),
-            entry.get("duration", 0) or 0,
+            title,
+            artist,
+            duration_ms,
             entry.get("isExplicit", False),
-            cover_url=playlist_cover,
+            cover_url=cover,
+            year=meta.get("year", ""),
         )
         if track:
             results.append(track)
