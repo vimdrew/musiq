@@ -9,7 +9,10 @@ import click
 from rich.table import Table
 
 from musiq.display import console, summary_table, stats_table
-from musiq.downloader import handle_url, handle_search_selection, process_track, _ytm_download
+from musiq.downloader import (
+    handle_url, handle_search_selection, process_track, _ytm_download,
+    _cookies_file, _cookies_browser, _warn_cookies_file_missing,
+)
 from musiq.duplicates import dedupe
 from musiq.history import get_all_downloads, clear_downloads, get_stats, get_file_path
 from musiq.itunes import search_itunes
@@ -527,6 +530,15 @@ def fix(query: tuple[str, ...]):
         "quiet": True,
         "no_warnings": True,
     }
+
+    cookies_file = _cookies_file()
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
+        _warn_cookies_file_missing()
+    else:
+        cookies_browser = _cookies_browser()
+        if cookies_browser:
+            ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
 
     console.print(f"[bold]Downloading from:[/bold] {url}")
     try:
