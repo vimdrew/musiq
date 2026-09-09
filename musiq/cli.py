@@ -242,7 +242,7 @@ def retag_playlist(url: str):
         if track.get("artists"):
             tags["artists"] = track["artists"]
         if track.get("album"):
-            tags.setdefault("album", track["album"])
+            tags["album"] = track["album"]
 
         cover_url = track.get("cover_url")
         if cover_url:

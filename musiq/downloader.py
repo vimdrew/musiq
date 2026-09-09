@@ -240,7 +240,11 @@ def process_track(
                 return {"status": "failed", "title": title, "artist": artist, "duration": duration_sec}
             downloaded, filesize_kb = dl_result
 
-        album = meta.get("album") or f"{title} - Single"
+        album = meta.get("album") or ""
+        if album.endswith("- Single") and itunes_meta.get("album"):
+            album = itunes_meta["album"]
+        if not album:
+            album = itunes_meta.get("album") or f"{title} - Single"
 
         if cover_url is None and itunes_meta.get("artwork_url"):
             cover_url = itunes_meta["artwork_url"]
