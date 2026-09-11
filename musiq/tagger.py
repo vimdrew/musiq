@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import eyed3
@@ -5,6 +6,8 @@ import requests
 from eyed3.id3 import frames
 
 from musiq.display import console
+
+logging.getLogger("eyed3").setLevel(logging.CRITICAL)
 
 GENRE_MAP = {
     "Hip-Hop/Rap": "Hip-Hop",
