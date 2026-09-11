@@ -183,6 +183,8 @@ def process_track(
                 yt_result = search_song(title, artist)
                 if yt_result:
                     video_url = f"https://www.youtube.com/watch?v={yt_result['video_id']}"
+                else:
+                    console.print(f"  [yellow]⚠ No YouTube Music match for {title} — {artist}, trying fallback[/yellow]")
         perf.t_search_ms = t_search.elapsed_ms
 
         itunes_meta = meta.get("_itunes_cache", {})
