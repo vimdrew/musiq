@@ -4,8 +4,10 @@ musiq/__init__.py
 musiq/cli.py
 musiq/display.py
 musiq/downloader.py
+musiq/duplicates.py
 musiq/history.py
 musiq/itunes.py
+musiq/navidrome.py
 musiq/perf.py
 musiq/spotify.py
 musiq/tagger.py

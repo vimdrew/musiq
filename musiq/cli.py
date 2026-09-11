@@ -17,6 +17,7 @@ from musiq.duplicates import dedupe
 from musiq.history import get_all_downloads, clear_downloads, get_stats, get_file_path
 from musiq.itunes import search_itunes
 from musiq.tagger import read_id3_tags, rewrite_id3_tags, fetch_cover_image
+from musiq.vpn import ensure_vpn_up
 from musiq import navidrome
 from musiq.spotify import resolve_playlist_tracks
 
@@ -34,7 +35,15 @@ def cli():
 @click.option("--workers", default=3, type=click.IntRange(1, 5), help="Parallel downloads for playlists (1-5)")
 def download(url: str, no_itunes: bool, dry_run: bool, force: bool, workers: int):
     """Download a track, album, or playlist from a Spotify URL."""
-    results = handle_url(url, no_itunes=no_itunes, dry_run=dry_run, force=force, workers=workers)
+    if dry_run:
+        results = handle_url(url, no_itunes=no_itunes, dry_run=True, force=force, workers=workers)
+        if not results:
+            return
+        console.print(f"\n[bold]Dry-run complete:[/bold] {len(results)} track(s)")
+        return
+
+    ensure_vpn_up()
+    results = handle_url(url, no_itunes=no_itunes, dry_run=False, force=force, workers=workers)
 
     if not results:
         return
@@ -42,11 +51,6 @@ def download(url: str, no_itunes: bool, dry_run: bool, force: bool, workers: int
     d = sum(1 for r in results if r.get("status") == "downloaded")
     s = sum(1 for r in results if r.get("status") == "skipped")
     f = sum(1 for r in results if r.get("status") == "failed")
-    dr = sum(1 for r in results if r.get("status") == "dry-run")
-
-    if dry_run:
-        console.print(f"\n[bold]Dry-run complete:[/bold] {len(results)} track(s)")
-        return
 
     console.print(
         f"\n[bold]Summary:[/bold] [green]{d} downloaded[/green], "
@@ -90,6 +94,8 @@ def playlist(url: str, no_itunes: bool, dry_run: bool, force: bool):
             a = ", ".join(t.get("artists", [])) or t.get("artist", "?")
             console.print(f"  [cyan]{t.get('title', '?')}[/cyan] — {a}")
         return
+
+    ensure_vpn_up()
 
     results: list[dict] = []
     for i, track in enumerate(tracks, 1):
@@ -348,6 +354,8 @@ def search(query: tuple[str, ...], no_itunes: bool, dry_run: bool, force: bool):
         type=click.IntRange(1, min(len(results), 10)),
     )
     selected = results[choice - 1]
+    if not dry_run:
+        ensure_vpn_up()
     console.print(f"\n[bold]Downloading:[/bold] {selected.get('title', '?')} — {selected.get('artist', '?')}")
 
     result = handle_search_selection(selected, no_itunes=no_itunes, dry_run=dry_run, force=force)
@@ -541,6 +549,7 @@ def fix(query: tuple[str, ...]):
             ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
 
     console.print(f"[bold]Downloading from:[/bold] {url}")
+    ensure_vpn_up()
     try:
         downloaded = _ytm_download(url, ydl_opts)
     except Exception as exc:
