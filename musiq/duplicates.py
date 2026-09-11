@@ -196,6 +196,36 @@ def _official_duration_map(paths: set[str]) -> dict[str, int]:
     return result
 
 
+def _parse_delete_choice(raw: str, group_size: int) -> set[int] | None:
+    """Parse the delete-prompt reply into 1-based file indexes.
+
+    None means delete nothing. 'y'/'all' selects every file except #1.
+    Numbers (optionally comma/space/range separated) select specific files.
+    """
+    cmd = raw.strip().lower()
+    if not cmd:
+        return None
+    if cmd in ("y", "yes", "all", "a"):
+        return set(range(2, group_size + 1))
+    if cmd in ("n", "no", "none", "s", "skip", "0", "cancel"):
+        return None
+    normalized = re.sub(r"[;,\s]+", ",", raw.strip()).strip(",")
+    selected: set[int] = set()
+    try:
+        for token in normalized.split(","):
+            if not token:
+                continue
+            if "-" in token:
+                lo_s, _, hi_s = token.partition("-")
+                lo, hi = int(lo_s), int(hi_s)
+                selected.update(range(lo, hi + 1))
+            else:
+                selected.add(int(token))
+    except ValueError:
+        return None
+    return {i for i in selected if 1 <= i <= group_size}
+
+
 def _delete_paths(paths: list[Path]) -> list[Path]:
     deleted: list[Path] = []
     for p in paths:
@@ -257,19 +287,23 @@ def dedupe(music_dir: Path, auto_yes: bool = False) -> int:
     total_deleted = 0
     for group in groups:
         _print_group(group, music_dir)
-        losers = [r.path for r in group[1:]]
+        to_delete: list[Path] = []
         if auto_yes:
-            ok = True
+            to_delete = [r.path for r in group[1:]]
         else:
             answer = click.prompt(
-                f"Delete {len(losers)} duplicate(s) in this group? (y/n/skip)",
+                "Delete which file(s)? (numbers like 2,3 | y = all except #1 | n = skip)",
                 default="n",
                 show_default=False,
                 type=str,
             )
-            ok = answer.strip().lower().startswith("y")
-        if ok:
-            deleted = _delete_paths(losers)
+            indexes = _parse_delete_choice(answer, len(group))
+            if indexes:
+                for i in sorted(indexes):
+                    console.print(f"  [yellow]✖ Marked for delete:[/yellow] #{i} {group[i - 1].path}")
+                to_delete = [group[i - 1].path for i in sorted(indexes)]
+        if to_delete:
+            deleted = _delete_paths(to_delete)
             for p in deleted:
                 console.print(f"[green]✓ Deleted:[/green] {p}")
             total_deleted += len(deleted)
