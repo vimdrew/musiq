@@ -11,6 +11,7 @@ dependencies = [
     "yt-dlp>=2026",
     "ytmusicapi>=1.12",
     "eyed3>=0.9",
+    "rapidfuzz>=3",
     "requests>=2",
     "beautifulsoup4>=4",
     "rich>=13",

@@ -13,6 +13,7 @@ from musiq.itunes import fetch_metadata as itunes_search
 from musiq.perf import Timer, PerfRecord
 from musiq.spotify import resolve_entity
 from musiq.tagger import tag_file
+from musiq.youtube import search_best_audio
 from musiq.ytmusic import search_song
 
 OUTPUT_BASE = Path.home() / "Music"
@@ -212,7 +213,7 @@ def process_track(
             cookies_browser = _cookies_browser()
             if cookies_browser:
                 ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
-        dl_url = video_url or f"ytsearch1:{title} {artist}"
+        dl_url = video_url or search_best_audio(title, artist, duration_sec) or f"ytsearch1:{title} {artist}"
 
         if not itunes_cached and not no_itunes:
             from concurrent.futures import ThreadPoolExecutor
