@@ -133,6 +133,76 @@ def _join_artists(meta: dict) -> str:
     return meta.get("artist", "Unknown Artist")
 
 
+def _build_ydl_opts(temp_dir: Path) -> dict:
+    """Build the shared yt-dlp options for MP3 conversion (320 kbps).
+
+    Applies whatever cookie configuration the user has opted into, so
+    age-restricted downloads behave the same across every command.
+    """
+    opts = {
+        "format": "bestaudio/best",
+        "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "320",
+            }
+        ],
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    cookies_file = _cookies_file()
+    if cookies_file:
+        opts["cookiefile"] = cookies_file
+        _warn_cookies_file_missing()
+    else:
+        cookies_browser = _cookies_browser()
+        if cookies_browser:
+            opts["cookiesfrombrowser"] = (cookies_browser,)
+    return opts
+
+
+def resolve_video(url: str) -> dict | None:
+    """Fetch metadata for a YouTube URL without downloading any audio.
+
+    Returns a tidy dict (video_id, title, uploader, upload_date,
+    thumbnail, duration) or None if the video can't be resolved.
+    """
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "socket_timeout": 15,
+    }
+    cookies_file = _cookies_file()
+    if cookies_file:
+        opts["cookiefile"] = cookies_file
+        _warn_cookies_file_missing()
+    else:
+        cookies_browser = _cookies_browser()
+        if cookies_browser:
+            opts["cookiesfrombrowser"] = (cookies_browser,)
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info:
+            return None
+        return {
+            "video_id": info.get("id") or "",
+            "title": info.get("title") or "",
+            "uploader": info.get("uploader") or info.get("channel") or "",
+            "upload_date": info.get("upload_date") or "",
+            "thumbnail": info.get("thumbnail") or "",
+            "duration": info.get("duration") or 0,
+        }
+    except Exception as exc:
+        console.print(f"[red]✖ Could not fetch video info: {exc}[/red]")
+        return None
+
+
 def _do_download(
     dl_url: str,
     ydl_opts: dict,
@@ -234,27 +304,7 @@ def process_track(
         itunes_cached = bool(itunes_meta)
 
         temp_dir = Path(tempfile.mkdtemp(prefix="musiq_"))
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
-            "postprocessors": [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "320",
-                }
-            ],
-            "quiet": True,
-            "no_warnings": True,
-        }
-        cookies_file = _cookies_file()
-        if cookies_file:
-            ydl_opts["cookiefile"] = cookies_file
-            _warn_cookies_file_missing()
-        else:
-            cookies_browser = _cookies_browser()
-            if cookies_browser:
-                ydl_opts["cookiesfrombrowser"] = (cookies_browser,)
+        ydl_opts = _build_ydl_opts(temp_dir)
         dl_url = video_url or search_best_audio(title, artist, duration_sec) or f"ytsearch1:{title} {artist}"
 
         if not itunes_cached and not no_itunes:

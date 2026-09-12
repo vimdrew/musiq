@@ -1,12 +1,14 @@
 Metadata-Version: 2.4
 Name: musiq
-Version: 0.2.0
+Version: 0.3.0
 Summary: Download music from Spotify to MP3 — pure yt-dlp + eyeD3 + iTunes API
 Requires-Python: >=3.10
 Requires-Dist: yt-dlp>=2026
 Requires-Dist: ytmusicapi>=1.12
 Requires-Dist: eyed3>=0.9
+Requires-Dist: rapidfuzz>=3
 Requires-Dist: requests>=2
 Requires-Dist: beautifulsoup4>=4
 Requires-Dist: rich>=13
 Requires-Dist: click>=8
+Requires-Dist: pillow>=10

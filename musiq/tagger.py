@@ -1,3 +1,4 @@
+import io
 import logging
 from pathlib import Path
 
@@ -56,6 +57,44 @@ def _set_artist_frames(tag, artists) -> None:
         tag.frame_set[frames.ARTIST_FID] = frames.TextFrame(frames.ARTIST_FID, artist)
 
 
+def image_from_path(path: str | Path) -> dict | None:
+    """Read a local image file into a dict usable as a rewrite_id3_tags image.
+
+    Returns {'picture_type', 'image_data', 'mime_type', 'description'} or
+    None if the file doesn't exist.
+    """
+    p = Path(path).expanduser()
+    if not p.is_file():
+        return None
+    mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
+    return {
+        "picture_type": 3,
+        "image_data": p.read_bytes(),
+        "mime_type": mime,
+        "description": "",
+    }
+
+
+def crop_to_square(image_data: bytes) -> bytes:
+    """Center-crop an image to a square (shorter dimension) and re-encode JPEG.
+
+    Album art is conventionally 1:1; YouTube thumbnails and screenshots are
+    not. Keeps the middle of the frame, drops the excess on the longer axis.
+    """
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(image_data))
+    img = img.convert("RGB")
+    w, h = img.size
+    s = min(w, h)
+    left = (w - s) // 2
+    top = (h - s) // 2
+    img = img.crop((left, top, left + s, top + s))
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=92)
+    return out.getvalue()
+
+
 def tag_file(
     filepath: Path,
     title: str,
@@ -67,6 +106,7 @@ def tag_file(
     cover_url: str | None = None,
     artists: list[str] | None = None,
     album_artist: str | None = None,
+    composer: str | None = None,
 ) -> None:
     try:
         audio = eyed3.load(str(filepath))
@@ -81,6 +121,7 @@ def tag_file(
         audio.tag.album_artist = album_artist or ""
         audio.tag.album = album
         audio.tag.track_num = track_number
+        audio.tag.composer = composer or ""
         normalised = normalise_genre(genre) if genre else None
         audio.tag.genre = normalised
         if year:
@@ -123,6 +164,7 @@ def read_id3_tags(filepath: Path) -> dict:
         "track_num": tag.track_num[0] if tag.track_num and tag.track_num[0] else 0,
         "disc_num": tag.disc_num[0] if tag.disc_num and tag.disc_num[0] else 0,
         "genre": tag.genre.name if tag.genre else "",
+        "composer": tag.composer or "",
         "year": "",
         "images": [],
     }
@@ -176,6 +218,7 @@ def rewrite_id3_tags(filepath: Path, tags: dict) -> None:
             audio.tag.disc_num = disc_num
         genre = tags.get("genre", "")
         audio.tag.genre = genre if genre else None
+        audio.tag.composer = tags.get("composer", "")
         year = tags.get("year", "")
         if year:
             try:

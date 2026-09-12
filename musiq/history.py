@@ -64,6 +64,34 @@ def get_file_path(spotify_id: str) -> str | None:
     return row[0]
 
 
+def get_download(spotify_id: str) -> dict | None:
+    """Return the full history row for a spotify_id, or None if absent.
+
+    Unlike track_exists this does not check whether the file still exists
+    on disk — the DB row is the authoritative 'have we imported this'
+    signal, so re-import dedupe is history-first.
+    """
+    with _lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "SELECT spotify_id, title, artist, album, file_path, downloaded_at "
+            "FROM downloads WHERE spotify_id = ?",
+            (spotify_id,),
+        )
+        row = cur.fetchone()
+        conn.close()
+    if row is None:
+        return None
+    return {
+        "spotify_id": row[0],
+        "title": row[1],
+        "artist": row[2],
+        "album": row[3],
+        "file_path": row[4],
+        "downloaded_at": row[5],
+    }
+
+
 def add_download(spotify_id: str, title: str, artist: str, album: str | None, file_path: str | None):
     with _lock:
         conn = get_conn()

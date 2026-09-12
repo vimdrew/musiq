@@ -8,6 +8,7 @@ scrapes the **Spotify embed** + **iTunes Search API** for metadata.
 ## Requirements
 
 - **ffmpeg** (required by yt-dlp for audio conversion)
+- **Pillow** (required by `musiq import` for square cover-art cropping)
 
   ```
   # Arch
@@ -32,6 +33,9 @@ pip install -e .
 # Download a single track
 musiq download "https://open.spotify.com/track/4iV5W9uYEdYUVa79Axb7Rh"
 
+# Import an underground/leaked upload straight from a YouTube URL
+musiq import "https://www.youtube.com/watch?v=apEMrIDUPz0"
+
 # Download an entire album
 musiq download "https://open.spotify.com/album/4m2880jivSbbyEGAKMJIT5"
 
@@ -53,6 +57,9 @@ musiq download <url> --force
 # Search Spotify interactively
 musiq search "bohemian rhapsody"
 
+# Import a single track from a YouTube URL (interactive metadata)
+musiq import "https://www.youtube.com/watch?v=apEMrIDUPz0"
+
 # Show download history
 musiq history
 
@@ -71,9 +78,20 @@ musiq stats
 2. **Fetch** iTunes Search API → genre, year, high-res artwork
 3. **Search** YouTube Music via `ytmusicapi` for best matching song → video ID
 4. **Download** video via yt-dlp → FFmpeg → MP3 320 kbps
-5. **Tag** with eyeD3: title, artist, album, track#, year, genre + cover art
+5. **Tag** with eyeD3: title, artist, album, track#, year, genre, composer + cover art
 6. **Save** to `~/Music/<Artist>/<Album>/<NN - Artist - Title.mp3>`
 7. **Record** in SQLite history + performance log
+
+### `musiq import` pipeline
+
+1. **Resolve** YouTube video metadata (yt-dlp, no download)
+2. **Parse** title heuristically to guess artist + song
+3. **Collect** metadata interactively (artist, album, year, genre, composer…)
+4. **Show** confirmation table; allow edits or artwork changes
+5. **Check** history.db by video_id (authoritative dedupe), then file path
+6. **Download** + convert via yt-dlp → FFmpeg → MP3 320 kbps
+7. **Crop** cover art to square (Pillow) if needed
+8. **Tag** with eyeD3 and record in history
 
 ### Fallback chain
 

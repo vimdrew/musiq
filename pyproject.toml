@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "musiq"
-version = "0.2.0"
+version = "0.3.0"
 description = "Download music from Spotify to MP3 — pure yt-dlp + eyeD3 + iTunes API"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,6 +16,7 @@ dependencies = [
     "beautifulsoup4>=4",
     "rich>=13",
     "click>=8",
+    "pillow>=10",
 ]
 
 [project.scripts]
