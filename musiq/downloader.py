@@ -22,6 +22,7 @@ MUSIQ_DIR = Path.home() / ".musiq"
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*]')
 _PARALLEL_LOCK = threading.Lock()
 _CONFIDENCE_THRESHOLD = 0.6
+_MB_JOIN_TIMEOUT = 6.0
 
 
 def _load_config() -> dict[str, str]:
@@ -81,6 +82,22 @@ def _warn_cookies_file_missing() -> None:
             f"'yt-dlp --cookies-from-browser chromium --cookies {path}'.[/yellow]"
         )
         _cookies_file_warned = True
+
+
+_mb_no_isrc_warned = False
+
+
+def _warn_mb_no_isrc() -> None:
+    """Log a missing-ISRC note once per process, not per track. Album and
+    playlist flows don't carry ISRC (only the single-track API and search
+    paths do), so confirmation rarely applies there."""
+    global _mb_no_isrc_warned
+    if _mb_no_isrc_warned:
+        return
+    console.print(
+        "[dim][mb] no ISRC in Spotify metadata — MusicBrainz confirmation skipped[/dim]"
+    )
+    _mb_no_isrc_warned = True
 
 
 def sanitize(name: str) -> str:
@@ -177,6 +194,31 @@ def process_track(
         console.print(f"  [cyan]Would download:[/cyan] {title} — {artist}")
         return {"status": "dry-run", "title": title, "artist": artist, "duration": duration_sec}
 
+    mb_thread = None
+    mb_isrc = meta.get("isrc") or ""
+    if mb_isrc and title != "Unknown":
+        from musiq.musicbrainz import confirm_and_log
+        mb_genre = (
+            meta.get("resolved_genre")
+            or (meta.get("_itunes_cache") or {}).get("genre")
+            or ""
+        )
+        mb_thread = threading.Thread(
+            target=confirm_and_log,
+            args=(
+                mb_isrc,
+                title,
+                meta.get("album") or "",
+                mb_genre or None,
+                "itunes" if mb_genre else "none",
+                duration_ms,
+            ),
+            daemon=True,
+        )
+        mb_thread.start()
+    else:
+        _warn_mb_no_isrc()
+
     with Timer() as total_timer:
         with Timer() as t_search:
             video_url = None
@@ -242,6 +284,9 @@ def process_track(
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 return {"status": "failed", "title": title, "artist": artist, "duration": duration_sec}
             downloaded, filesize_kb = dl_result
+
+        if mb_thread:
+            mb_thread.join(timeout=_MB_JOIN_TIMEOUT)
 
         album = meta.get("album") or ""
         if album.endswith("- Single") and itunes_meta.get("album"):
