@@ -6,17 +6,21 @@ import tempfile
 from pathlib import Path
 
 import click
+from rich import box
 from rich.table import Table
 
 from musiq.display import console, summary_table, stats_table
+from musiq.discogs import fetch_track_metadata as discogs_meta
 from musiq.downloader import (
     handle_url, handle_search_selection, process_track, _ytm_download,
     _build_ydl_opts,
 )
 from musiq.duplicates import dedupe
 from musiq.history import get_all_downloads, clear_downloads, get_stats, get_file_path
-from musiq.itunes import search_itunes
-from musiq.tagger import read_id3_tags, rewrite_id3_tags, fetch_cover_image
+from musiq.itunes import search_itunes, fetch_metadata
+from musiq.lastfm import fetch_track_info
+from musiq.musicbrainz import recording_metadata
+from musiq.tagger import read_id3_tags, rewrite_id3_tags, fetch_cover_image, normalise_genre
 from musiq import navidrome
 from musiq.spotify import resolve_playlist_tracks
 
@@ -632,6 +636,333 @@ def edit(query: tuple[str, ...]):
         f"[dim]Genre:[/dim] {tags['genre'] or '—'}  "
         f"[dim]Year:[/dim] {tags['year'] or '—'}"
     )
+
+
+@cli.command("retag")
+@click.argument("query", nargs=-1, required=True)
+def retag(query: tuple[str, ...]):
+    """Fetch metadata for a track and fix its ID3 tags.
+
+Looks the track up in MusicBrainz, iTunes, Last.fm and Discogs
+    (artist/title based), shows what each source returns versus what's
+    tagged now, and lets you confirm or edit the proposed corrections before
+    writing them. Cover art is left untouched.
+    """
+    q = " ".join(query)
+    music_dir = _music_dir()
+
+    filepath = _select_track(music_dir, q)
+    if filepath is None:
+        return
+
+    artist, album, song = _track_parts(music_dir, filepath)
+    if not click.confirm(f'Retag "{song}" — {artist}?', default=True):
+        console.print("[yellow]Cancelled[/yellow]")
+        return
+
+    tags = read_id3_tags(filepath)
+    if not tags:
+        console.print(f"[red]✖ No ID3 tags found in {filepath}[/red]")
+        raise SystemExit(1)
+
+    cur_title = tags.get("title") or song
+    cur_artist = tags.get("artist") or artist
+    console.print(f"[bold]Fetching metadata for:[/bold] {cur_title} — {cur_artist}")
+
+    itunes_meta = fetch_metadata(cur_artist, cur_title)
+    lastfm_meta = fetch_track_info(cur_artist, cur_title)
+    dg = discogs_meta(
+        cur_artist, cur_title, tags.get("album") or album, tags.get("year") or ""
+    )
+    mb = recording_metadata(cur_artist, cur_title, tags.get("album") or album)
+
+    proposed = _propose_metadata(tags, mb, itunes_meta, lastfm_meta, dg, song, artist)
+
+    changed = [
+        f
+        for f in ("title", "artist", "album", "track_num", "year", "genre", "composer")
+        if _field_changed(tags, proposed, f)
+    ]
+    if not changed:
+        console.print("[yellow]No metadata changes suggested — already up to date[/yellow]")
+        return
+
+    while True:
+        console.print(_retag_table(tags, proposed, mb, itunes_meta, lastfm_meta, dg))
+        choice = click.prompt(
+            "Apply changes?",
+            type=click.Choice(["yes", "edit", "skip"], case_sensitive=False),
+            default="yes",
+            show_choices=True,
+        ).lower()
+        if choice == "skip":
+            console.print("[yellow]Skipped[/yellow]")
+            return
+        if choice == "yes":
+            break
+        proposed = _retag_prompt_fields(proposed)
+
+    try:
+        rewrite_id3_tags(filepath, proposed)
+    except Exception as exc:
+        console.print(f"[red]✖ Failed to rewrite tags: {exc}[/red]")
+        raise SystemExit(1)
+
+    console.print(f"[green]✓ Retagged:[/green] {filepath}")
+    composer = proposed.get("composer") or "—"
+    console.print(
+        f"  [dim]{proposed.get('title')} / {proposed.get('artist')} / "
+        f"{proposed.get('album')} · {proposed.get('genre') or '—'} · "
+        f"{proposed.get('year') or '—'} · composer: {composer}[/dim]"
+    )
+
+
+def _str_value(tags: dict, field: str) -> str:
+    v = tags.get(field) or ""
+    if field == "track_num":
+        return f"{v:02d}" if isinstance(v, int) and v else ""
+    return str(v)
+
+
+def _field_changed(current: dict, proposed: dict, field: str) -> bool:
+    c = _str_value(current, field)
+    p = _str_value(proposed, field)
+    return bool(p and c != p)
+
+
+def _propose_metadata(
+    tags: dict,
+    mb_meta: dict,
+    itunes_meta: dict,
+    lastfm_meta: dict,
+    discogs_meta: dict,
+    fallback_song: str,
+    fallback_artist: str,
+) -> dict:
+    """Merge the best available metadata into a proposed tag set.
+
+    Details wins over broad strokes: MusicBrainz for album/year/genre when
+    it has a confident release-group match (MBID-keyed, unambiguous), iTunes
+    for album/year/genre as the fallback, Last.fm for artist/title
+    cross-check via autocorrect, Discogs for track position and per-track
+    composer credits, and existing values are kept when a source has nothing
+    to add. Images are carried through untouched.
+    """
+    proposed = {k: v for k, v in tags.items() if k != "images"}
+    cur_title = tags.get("title") or fallback_song
+    cur_artist = tags.get("artist") or fallback_artist
+
+    proposed["title"] = lastfm_meta.get("title") or cur_title
+    proposed["artist"] = lastfm_meta.get("artist") or cur_artist
+    proposed["artists"] = [proposed["artist"]] if proposed["artist"] else tags.get("artists", [])
+    mb_confident = bool(mb_meta.get("ok") and mb_meta.get("match"))
+    proposed["album"] = (
+        (mb_meta.get("album") if mb_confident else "")
+        or itunes_meta.get("album")
+        or lastfm_meta.get("album")
+        or discogs_meta.get("album")
+        or tags.get("album")
+        or cur_title
+    )
+    mb_genre = mb_meta.get("genre") if mb_confident else ""
+    if mb_genre:
+        proposed["genre"] = normalise_genre(mb_genre)
+    elif itunes_meta.get("genre") and (
+        not mb_confident or itunes_meta.get("confidence", 1.0) >= 0.9
+    ):
+        proposed["genre"] = normalise_genre(itunes_meta["genre"])
+    elif discogs_meta.get("genre"):
+        proposed["genre"] = discogs_meta["genre"]
+    if mb_confident and mb_meta.get("year"):
+        proposed["year"] = mb_meta["year"]
+    elif itunes_meta.get("year"):
+        proposed["year"] = itunes_meta["year"]
+    elif discogs_meta.get("year"):
+        proposed["year"] = discogs_meta["year"]
+    if discogs_meta.get("track_num"):
+        proposed["track_num"] = discogs_meta["track_num"]
+    elif lastfm_meta.get("track_num"):
+        proposed["track_num"] = lastfm_meta["track_num"]
+    if discogs_meta.get("composer"):
+        proposed["composer"] = discogs_meta["composer"]
+
+    proposed["images"] = tags.get("images", [])
+    return proposed
+
+
+def _retag_table(
+    tags: dict,
+    proposed: dict,
+    mb_meta: dict,
+    itunes_meta: dict,
+    lastfm_meta: dict,
+    discogs_meta: dict,
+) -> Table:
+    table = Table(box=box.ROUNDED, title="Retag — proposed metadata")
+    table.add_column("Field", style="bold cyan")
+    table.add_column("Current")
+    table.add_column("Proposed")
+    table.add_column("Source", style="dim")
+
+    mb_confident = bool(mb_meta.get("ok") and mb_meta.get("match"))
+
+    rows = [
+        ("Title", "title"),
+        ("Artist", "artist"),
+        ("Album", "album"),
+        ("Track", "track_num"),
+        ("Year", "year"),
+        ("Genre", "genre"),
+        ("Composer", "composer"),
+    ]
+    for label, field in rows:
+        cur = _str_value(tags, field)
+        prop = _str_value(proposed, field)
+        style = "green" if prop and cur == prop else ("yellow" if prop else "dim")
+        source = []
+        if field == "album":
+            if mb_confident and mb_meta.get("album"):
+                source.append("MusicBrainz")
+            if itunes_meta.get("album"):
+                source.append("iTunes")
+            if lastfm_meta.get("album"):
+                source.append("Last.fm")
+            if discogs_meta.get("album"):
+                source.append("Discogs")
+        elif field == "track_num":
+            if discogs_meta.get("track_num"):
+                source.append("Discogs")
+            if lastfm_meta.get("track_num"):
+                source.append("Last.fm")
+        elif field == "composer":
+            if discogs_meta.get("composer"):
+                source.append("Discogs")
+        elif field == "year":
+            if mb_confident and mb_meta.get("year"):
+                source.append("MusicBrainz")
+            if itunes_meta.get("year"):
+                source.append("iTunes")
+            if discogs_meta.get("year"):
+                source.append("Discogs")
+        elif field == "genre":
+            if mb_confident and mb_meta.get("genre"):
+                source.append("MusicBrainz")
+            if itunes_meta.get("genre"):
+                source.append("iTunes")
+            if discogs_meta.get("genre"):
+                source.append("Discogs")
+        elif field in ("title", "artist"):
+            if lastfm_meta.get(field):
+                source.append("Last.fm")
+        table.add_row(
+            label,
+            cur or "[dim]—[/dim]",
+            f"[{style}]{prop or '—'}[/{style}]",
+            ", ".join(source),
+        )
+
+    if mb_meta.get("ok") and mb_meta.get("match"):
+        detail = mb_meta["reason"] or (
+            mb_meta.get("rg_title") or mb_meta.get("release_title") or ""
+        )
+        sec_types = mb_meta.get("secondary_types") or []
+        type_str = mb_meta.get("primary_type") or "?"
+        if sec_types:
+            type_str += " · " + ", ".join(sec_types)
+        table.add_row(
+            "MusicBrainz release",
+            "",
+            "[dim]" + detail + "[/dim]",
+            f"release-group ({type_str})",
+        )
+    elif mb_meta.get("ok") and not mb_meta.get("match"):
+        table.add_row(
+            "⚠ MusicBrainz match",
+            "",
+            "[yellow]weak[/yellow]",
+            mb_meta.get("reason") or "no confident release-group match",
+        )
+    elif not mb_meta.get("ok") and mb_meta.get("error"):
+        table.add_row(
+            "⚠ MusicBrainz lookup",
+            "",
+            "[yellow]unavailable[/yellow]",
+            mb_meta["error"],
+        )
+
+    if itunes_meta.get("confidence", 0.0) > 0 and itunes_meta["confidence"] < 0.9:
+        table.add_row(
+            "⚠ iTunes match",
+            "",
+            "[yellow]weak[/yellow]",
+            "low confidence on the iTunes result",
+        )
+
+    if lastfm_meta.get("toptags"):
+        table.add_row(
+            "Last.fm tags",
+            "",
+            "[dim]" + ", ".join(lastfm_meta["toptags"][:6]) + "[/dim]",
+            "Last.fm (no tag applied)",
+        )
+
+    if discogs_meta.get("styles"):
+        table.add_row(
+            "Discogs styles",
+            "",
+            "[dim]" + ", ".join(discogs_meta["styles"][:6]) + "[/dim]",
+            "Discogs (no tag applied)",
+        )
+
+    if discogs_meta.get("ok") and discogs_meta.get("data_quality") in ("Needs Vote", "Minimal", "Draft"):
+        table.add_row(
+            "⚠ Discogs record",
+            "",
+            "[yellow]" + discogs_meta["data_quality"] + "[/yellow]",
+            "entry may be incomplete",
+        )
+
+    if not discogs_meta.get("ok") and discogs_meta.get("error"):
+        table.add_row(
+            "⚠ Discogs lookup",
+            "",
+            "[yellow]unavailable[/yellow]",
+            discogs_meta["error"],
+        )
+
+    return table
+
+
+def _retag_prompt_fields(proposed: dict) -> dict:
+    """Let the user edit the proposed metadata field by field."""
+    proposed["title"] = click.prompt("Title", default=proposed.get("title") or "")
+    proposed["artist"] = click.prompt("Artist", default=proposed.get("artist") or "")
+    proposed["artists"] = [proposed["artist"]] if proposed["artist"] else []
+    proposed["album"] = click.prompt("Album", default=proposed.get("album") or "")
+    proposed["track_num"] = click.prompt(
+        "Track number", default=proposed.get("track_num") or 0, type=int
+    )
+    proposed["disc_num"] = click.prompt(
+        "Disc number", default=proposed.get("disc_num") or 0, type=int
+    )
+    while True:
+        year_raw = click.prompt(
+            "Year", default=proposed.get("year") or "", type=str, show_default=False
+        ).strip()
+        if not year_raw:
+            proposed["year"] = ""
+            break
+        if year_raw.isdigit():
+            proposed["year"] = str(int(year_raw))
+            break
+        console.print("[yellow]⚠ Invalid year — enter a number or press Enter to skip[/yellow]")
+    proposed["genre"] = click.prompt(
+        "Genre", default=proposed.get("genre") or "", type=str, show_default=False
+    ).strip()
+    proposed["composer"] = click.prompt(
+        "Composer", default=proposed.get("composer") or "", type=str, show_default=False
+    ).strip()
+    return proposed
 
 
 @cli.command("duplicates")
