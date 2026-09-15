@@ -47,14 +47,8 @@ def fetch_cover_image(cover_url: str) -> dict | None:
 
 
 def _set_artist_frames(tag, artists) -> None:
-    """Write TPE1 as a multi-value field (one frame per artist)."""
-    if isinstance(artists, str):
-        artists = [artists]
-    artists = [a for a in (artists or []) if a]
-
-    tag.frame_set.pop(frames.ARTIST_FID, None)
-    for artist in artists or [""]:
-        tag.frame_set[frames.ARTIST_FID] = frames.TextFrame(frames.ARTIST_FID, artist)
+    """Write TPE1 as a multi-value field (one frame, null-separated values)."""
+    _write_text_frame(tag, frames.ARTIST_FID, artists)
 
 
 def image_from_path(path: str | Path) -> dict | None:
@@ -118,10 +112,10 @@ def tag_file(
 
         audio.tag.title = title
         _set_artist_frames(audio.tag, artists or artist)
-        audio.tag.album_artist = album_artist or ""
+        _write_text_frame(audio.tag, frames.ALBUM_ARTIST_FID, album_artist or "")
         audio.tag.album = album
         audio.tag.track_num = track_number
-        audio.tag.composer = composer or ""
+        _write_text_frame(audio.tag, frames.COMPOSER_FID, composer or "")
         normalised = normalise_genre(genre) if genre else None
         audio.tag.genre = normalised
         if year:
@@ -160,18 +154,22 @@ def _sanitize_tag_text(value: str) -> str:
 
 
 def _split_tag_values(text: str) -> list[str]:
-    """Split a single ID3 text frame's value into its individual values.
+    """Split a frame's text into its individual values.
 
     ID3v2 frames can carry several values in one frame, separated by a null
-    byte. Split on the separator, sanitize each part and drop blanks, so a
-    TPE1 frame like ``"Drake\\x00Jhené Aiko"`` reads back as two names
-    instead of one mangled string.
+    byte, and external metadata sources (MusicBrainz, Last.fm, YouTube) pack
+    collaborations as slash-separated or comma-space-separated names. Split
+    on every separator, sanitize each part and drop blanks, so a TPE1 frame
+    like ``"Drake\\x00Jhené Aiko"``, ``"Travis Scott/Kacy Hill"`` or
+    ``"Drake, Jhené Aiko"`` all read back as separate names.
     """
     values: list[str] = []
-    for part in str(text or "").split("\x00"):
-        clean = _sanitize_tag_text(part)
-        if clean:
-            values.append(clean)
+    for piece in str(text or "").split("\x00"):
+        for token in piece.split(", "):
+            for part in token.split("/"):
+                clean = _sanitize_tag_text(part)
+                if clean:
+                    values.append(clean)
     return values
 
 
@@ -189,6 +187,42 @@ def _frame_values(frame_list) -> list[str]:
     return values
 
 
+def _split_multi_value(value) -> list[str]:
+    """Normalise a string or list of strings into individual multi-values.
+
+    Accepts either layout the pipeline produces: a structured list, a single
+    null-separated frame (the ID3v2 convention spotdl/mutagen write), or a
+    comma-space/slash-joined display string (what ``read_id3_tags`` and the
+    iTunes/MusicBrainz/Last.fm sources return). Splits on every separator so
+    a multi-artist value can never be re-serialized as one literal string,
+    and any value that was flattened into a joined literal on disk gets split
+    back out on the next write.
+    """
+    if value is None:
+        return []
+    items = value if isinstance(value, (list, tuple)) else [value]
+    out: list[str] = []
+    for item in items:
+        if item is None:
+            continue
+        out.extend(_split_tag_values(item))
+    return out
+
+
+def _write_text_frame(tag, frame_id, values) -> None:
+    """Write a multi-value-capable text frame (TPE1/TPE2/TCOM).
+
+    Stores the values null-separated inside a single frame — the same
+    on-disk layout spotdl/mutagen and the download pipeline produce, and the
+    one NaviBeat already renders as separate artist chips. Removes the frame
+    entirely when there are no values.
+    """
+    tag.frame_set.pop(frame_id, None)
+    values = _split_multi_value(values)
+    if values:
+        tag.frame_set[frame_id] = frames.TextFrame(frame_id, "\x00".join(values))
+
+
 def read_id3_tags(filepath: Path) -> dict:
     """Read all ID3 tags from an MP3 file and return them as a dict."""
     audio = eyed3.load(str(filepath))
@@ -199,6 +233,14 @@ def read_id3_tags(filepath: Path) -> dict:
     artists = _frame_values(tag.frame_set.get(frames.ARTIST_FID))
     album_artists = _frame_values(tag.frame_set.get(frames.ALBUM_ARTIST_FID))
     composers = _frame_values(tag.frame_set.get(frames.COMPOSER_FID))
+    # True when the on-disk TPE1 still packs a collaboration into a single
+    # slash-separated literal (a flattened download). The read splits it for
+    # display, but the file itself needs a rewrite to register separate
+    # artists in players — retag uses this to force a repair write even when
+    # the proposed metadata is otherwise unchanged.
+    raw_artist_texts = [
+        f.text for f in (tag.frame_set.get(frames.ARTIST_FID) or []) if getattr(f, "text", None)
+    ]
     tags: dict = {
         "title": _sanitize_tag_text(tag.title),
         "artist": ", ".join(artists),
@@ -211,6 +253,7 @@ def read_id3_tags(filepath: Path) -> dict:
         "composer": ", ".join(composers),
         "year": "",
         "images": [],
+        "artist_repair": any("/" in (t or "") for t in raw_artist_texts),
     }
 
     if tag.recording_date:
@@ -254,7 +297,7 @@ def rewrite_id3_tags(filepath: Path, tags: dict) -> None:
 
         audio.tag.title = tags.get("title", "")
         _set_artist_frames(audio.tag, tags.get("artists") or tags.get("artist", ""))
-        audio.tag.album_artist = tags.get("album_artist", "")
+        _write_text_frame(audio.tag, frames.ALBUM_ARTIST_FID, tags.get("album_artist", ""))
         audio.tag.album = tags.get("album", "")
         audio.tag.track_num = tags.get("track_num", 0)
         disc_num = tags.get("disc_num", 0)
@@ -262,7 +305,7 @@ def rewrite_id3_tags(filepath: Path, tags: dict) -> None:
             audio.tag.disc_num = disc_num
         genre = tags.get("genre", "")
         audio.tag.genre = genre if genre else None
-        audio.tag.composer = tags.get("composer", "")
+        _write_text_frame(audio.tag, frames.COMPOSER_FID, tags.get("composer", ""))
         year = tags.get("year", "")
         if year:
             try:

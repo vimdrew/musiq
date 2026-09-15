@@ -22,7 +22,7 @@ from musiq.lastfm import fetch_track_info
 from musiq.musicbrainz import recording_metadata
 from musiq.tagger import (
     read_id3_tags, rewrite_id3_tags, fetch_cover_image, normalise_genre,
-    _sanitize_tag_text,
+    _sanitize_tag_text, _split_multi_value,
 )
 from musiq import navidrome
 from musiq.spotify import resolve_playlist_tracks
@@ -702,6 +702,8 @@ Looks the track up in MusicBrainz, iTunes, Last.fm and Discogs
         for f in ("title", "artist", "album", "track_num", "year", "genre", "composer")
         if _field_changed(tags, proposed, f)
     ]
+    if tags.get("artist_repair") and "artist" not in changed:
+        changed.append("artist")
     if not changed:
         console.print("[yellow]No metadata changes suggested — already up to date[/yellow]")
         return
@@ -773,7 +775,8 @@ def _propose_metadata(
 
     proposed["title"] = lastfm_meta.get("title") or cur_title
     proposed["artist"] = lastfm_meta.get("artist") or cur_artist
-    proposed["artists"] = [proposed["artist"]] if proposed["artist"] else tags.get("artists", [])
+    proposed["artists"] = _split_multi_value(proposed["artist"]) or tags.get("artists", [])
+    proposed["artist"] = ", ".join(proposed["artists"])
     mb_confident = bool(mb_meta.get("ok") and mb_meta.get("match"))
     proposed["album"] = (
         (mb_meta.get("album") if mb_confident else "")
