@@ -20,9 +20,28 @@ from musiq.history import get_all_downloads, clear_downloads, get_stats, get_fil
 from musiq.itunes import search_itunes, fetch_metadata
 from musiq.lastfm import fetch_track_info
 from musiq.musicbrainz import recording_metadata
-from musiq.tagger import read_id3_tags, rewrite_id3_tags, fetch_cover_image, normalise_genre
+from musiq.tagger import (
+    read_id3_tags, rewrite_id3_tags, fetch_cover_image, normalise_genre,
+    _sanitize_tag_text,
+)
 from musiq import navidrome
 from musiq.spotify import resolve_playlist_tracks
+
+
+def _prompt(*args, **kwargs):
+    """Defense-in-depth wrapper around ``click.prompt``.
+
+    Scrubs null bytes and other control characters from the *default* string
+    before passing it through.  ``read_id3_tags`` already sanitizes tag text
+    at the source, but the scrub here acts as a safety net: if a value
+    somehow slips past (or reaches here from a path-derived name), the prompt
+    will never crash readline with ``ValueError("prompt string cannot contain
+    null characters")``.
+    """
+    default = kwargs.get("default")
+    if isinstance(default, str):
+        kwargs["default"] = _sanitize_tag_text(default)
+    return click.prompt(*args, **kwargs)
 
 
 @click.group()
@@ -602,19 +621,19 @@ def edit(query: tuple[str, ...]):
     console.print(f"[bold]Editing tags for:[/bold] {filepath}")
     console.print(f"  [dim]{tags.get('title') or song} — {tags.get('artist') or artist}[/dim]")
 
-    tags["title"] = click.prompt("Title", default=tags.get("title") or "", type=str)
+    tags["title"] = _prompt("Title", default=tags.get("title") or "", type=str)
     orig_artist = tags.get("artist") or ""
-    new_artist = click.prompt("Artist", default=orig_artist, type=str)
+    new_artist = _prompt("Artist", default=orig_artist, type=str)
     tags["artist"] = new_artist
     if new_artist != orig_artist:
         tags["artists"] = [new_artist]
-    tags["album"] = click.prompt("Album", default=tags.get("album") or "", type=str)
-    tags["track_num"] = click.prompt("Track number", default=tags.get("track_num") or 0, type=int)
-    tags["disc_num"] = click.prompt("Disc number", default=tags.get("disc_num") or 0, type=int)
-    tags["genre"] = click.prompt("Genre", default=tags.get("genre") or "", type=str)
+    tags["album"] = _prompt("Album", default=tags.get("album") or "", type=str)
+    tags["track_num"] = _prompt("Track number", default=tags.get("track_num") or 0, type=int)
+    tags["disc_num"] = _prompt("Disc number", default=tags.get("disc_num") or 0, type=int)
+    tags["genre"] = _prompt("Genre", default=tags.get("genre") or "", type=str)
 
     while True:
-        year_raw = click.prompt("Year", default=tags.get("year") or "", type=str).strip()
+        year_raw = _prompt("Year", default=tags.get("year") or "", type=str).strip()
         if not year_raw:
             break
         if year_raw.isdigit():
@@ -935,18 +954,18 @@ def _retag_table(
 
 def _retag_prompt_fields(proposed: dict) -> dict:
     """Let the user edit the proposed metadata field by field."""
-    proposed["title"] = click.prompt("Title", default=proposed.get("title") or "")
-    proposed["artist"] = click.prompt("Artist", default=proposed.get("artist") or "")
+    proposed["title"] = _prompt("Title", default=proposed.get("title") or "")
+    proposed["artist"] = _prompt("Artist", default=proposed.get("artist") or "")
     proposed["artists"] = [proposed["artist"]] if proposed["artist"] else []
-    proposed["album"] = click.prompt("Album", default=proposed.get("album") or "")
-    proposed["track_num"] = click.prompt(
+    proposed["album"] = _prompt("Album", default=proposed.get("album") or "")
+    proposed["track_num"] = _prompt(
         "Track number", default=proposed.get("track_num") or 0, type=int
     )
-    proposed["disc_num"] = click.prompt(
+    proposed["disc_num"] = _prompt(
         "Disc number", default=proposed.get("disc_num") or 0, type=int
     )
     while True:
-        year_raw = click.prompt(
+        year_raw = _prompt(
             "Year", default=proposed.get("year") or "", type=str, show_default=False
         ).strip()
         if not year_raw:
@@ -956,10 +975,10 @@ def _retag_prompt_fields(proposed: dict) -> dict:
             proposed["year"] = str(int(year_raw))
             break
         console.print("[yellow]⚠ Invalid year — enter a number or press Enter to skip[/yellow]")
-    proposed["genre"] = click.prompt(
+    proposed["genre"] = _prompt(
         "Genre", default=proposed.get("genre") or "", type=str, show_default=False
     ).strip()
-    proposed["composer"] = click.prompt(
+    proposed["composer"] = _prompt(
         "Composer", default=proposed.get("composer") or "", type=str, show_default=False
     ).strip()
     return proposed

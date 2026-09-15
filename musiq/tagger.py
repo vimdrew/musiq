@@ -146,6 +146,49 @@ def tag_file(
         raise
 
 
+def _sanitize_tag_text(value: str) -> str:
+    """Strip null bytes and other control characters from ID3-text-derived strings.
+
+    ID3v2 text frames separate multiple values with a null byte, and some
+    taggers (e.g. iTunes) pack several artists into one TPE1 frame. eyeD3
+    surfaces that byte verbatim, which then mangles displays and crashes
+    readline-based prompts (click.prompt rejects null bytes). Stripping
+    control characters keeps tag-derived text safe to display and edit
+    anywhere else in the pipeline too.
+    """
+    return "".join(ch for ch in str(value or "") if ch >= " " and ch != "\x7f").strip()
+
+
+def _split_tag_values(text: str) -> list[str]:
+    """Split a single ID3 text frame's value into its individual values.
+
+    ID3v2 frames can carry several values in one frame, separated by a null
+    byte. Split on the separator, sanitize each part and drop blanks, so a
+    TPE1 frame like ``"Drake\\x00Jhené Aiko"`` reads back as two names
+    instead of one mangled string.
+    """
+    values: list[str] = []
+    for part in str(text or "").split("\x00"):
+        clean = _sanitize_tag_text(part)
+        if clean:
+            values.append(clean)
+    return values
+
+
+def _frame_values(frame_list) -> list[str]:
+    """Flatten one or more ID3 text frames into a sanitized list of values.
+
+    Handles both layouts found in the wild: one frame per value (musiq's own
+    writer) and several null-separated values packed into a single frame
+    (iTunes and friends).
+    """
+    values: list[str] = []
+    for frame in frame_list or []:
+        if getattr(frame, "text", None):
+            values.extend(_split_tag_values(frame.text))
+    return values
+
+
 def read_id3_tags(filepath: Path) -> dict:
     """Read all ID3 tags from an MP3 file and return them as a dict."""
     audio = eyed3.load(str(filepath))
@@ -153,18 +196,19 @@ def read_id3_tags(filepath: Path) -> dict:
         return {}
 
     tag = audio.tag
-    artist_frames = tag.frame_set[frames.ARTIST_FID] or []
-    artists = [f.text for f in artist_frames if f.text]
+    artists = _frame_values(tag.frame_set.get(frames.ARTIST_FID))
+    album_artists = _frame_values(tag.frame_set.get(frames.ALBUM_ARTIST_FID))
+    composers = _frame_values(tag.frame_set.get(frames.COMPOSER_FID))
     tags: dict = {
-        "title": tag.title or "",
-        "artist": tag.artist or "",
+        "title": _sanitize_tag_text(tag.title),
+        "artist": ", ".join(artists),
         "artists": artists,
-        "album_artist": tag.album_artist or "",
-        "album": tag.album or "",
+        "album_artist": ", ".join(album_artists),
+        "album": _sanitize_tag_text(tag.album),
         "track_num": tag.track_num[0] if tag.track_num and tag.track_num[0] else 0,
         "disc_num": tag.disc_num[0] if tag.disc_num and tag.disc_num[0] else 0,
-        "genre": tag.genre.name if tag.genre else "",
-        "composer": tag.composer or "",
+        "genre": _sanitize_tag_text(tag.genre.name if tag.genre else ""),
+        "composer": ", ".join(composers),
         "year": "",
         "images": [],
     }
