@@ -7,9 +7,11 @@ from pathlib import Path
 
 import click
 from rich import box
+from rich.markup import escape
 from rich.table import Table
 
 from musiq.display import console, summary_table, stats_table
+from musiq.deezer import fetch_track_metadata as deezer_meta
 from musiq.discogs import fetch_track_metadata as discogs_meta
 from musiq.downloader import (
     handle_url, handle_search_selection, process_track, _ytm_download,
@@ -662,10 +664,12 @@ def edit(query: tuple[str, ...]):
 def retag(query: tuple[str, ...]):
     """Fetch metadata for a track and fix its ID3 tags.
 
-Looks the track up in MusicBrainz, iTunes, Last.fm and Discogs
+    Looks the track up in MusicBrainz, iTunes, Deezer, Last.fm and Discogs
     (artist/title based), shows what each source returns versus what's
-    tagged now, and lets you confirm or edit the proposed corrections before
-    writing them. Cover art is left untouched.
+    tagged now. When sources disagree it shows a numbered breakdown per
+    field (with any weak-match / data-quality caveats) and lets you pick
+    an alternative or type a value per field — or press Enter to accept the
+    proposal and write the tags. Cover art is left untouched.
     """
     q = " ".join(query)
     music_dir = _music_dir()
@@ -689,13 +693,14 @@ Looks the track up in MusicBrainz, iTunes, Last.fm and Discogs
     console.print(f"[bold]Fetching metadata for:[/bold] {cur_title} — {cur_artist}")
 
     itunes_meta = fetch_metadata(cur_artist, cur_title)
+    dz = deezer_meta(cur_artist, cur_title)
     lastfm_meta = fetch_track_info(cur_artist, cur_title)
     dg = discogs_meta(
         cur_artist, cur_title, tags.get("album") or album, tags.get("year") or ""
     )
     mb = recording_metadata(cur_artist, cur_title, tags.get("album") or album)
 
-    proposed = _propose_metadata(tags, mb, itunes_meta, lastfm_meta, dg, song, artist)
+    proposed = _propose_metadata(tags, mb, itunes_meta, dz, lastfm_meta, dg, song, artist)
 
     changed = [
         f
@@ -709,19 +714,24 @@ Looks the track up in MusicBrainz, iTunes, Last.fm and Discogs
         return
 
     while True:
-        console.print(_retag_table(tags, proposed, mb, itunes_meta, lastfm_meta, dg))
-        choice = click.prompt(
-            "Apply changes?",
-            type=click.Choice(["yes", "edit", "skip"], case_sensitive=False),
+        console.print(_retag_table(tags, proposed, mb, itunes_meta, dz, lastfm_meta, dg))
+        choice = _prompt(
+            "Accept [yes] / skip / edit a field (1-7 or name)",
             default="yes",
-            show_choices=True,
-        ).lower()
-        if choice == "skip":
+            show_default=True,
+        ).strip()
+        action = _retag_action(choice)
+        if action == "yes":
+            break
+        if action == "skip":
             console.print("[yellow]Skipped[/yellow]")
             return
-        if choice == "yes":
-            break
-        proposed = _retag_prompt_fields(proposed)
+        if action is None:
+            console.print("[yellow]Unknown choice — use yes, skip, or a field name/number[/yellow]")
+            continue
+        proposed = _retag_prompt_field(
+            tags, proposed, action, mb, itunes_meta, dz, lastfm_meta, dg
+        )
 
     try:
         rewrite_id3_tags(filepath, proposed)
@@ -755,6 +765,7 @@ def _propose_metadata(
     tags: dict,
     mb_meta: dict,
     itunes_meta: dict,
+    deezer_meta_arg: dict,
     lastfm_meta: dict,
     discogs_meta: dict,
     fallback_song: str,
@@ -764,7 +775,7 @@ def _propose_metadata(
 
     Details wins over broad strokes: MusicBrainz for album/year/genre when
     it has a confident release-group match (MBID-keyed, unambiguous), iTunes
-    for album/year/genre as the fallback, Last.fm for artist/title
+    and Deezer for album/year/genre as the fallback, Last.fm for artist/title
     cross-check via autocorrect, Discogs for track position and per-track
     composer credits, and existing values are kept when a source has nothing
     to add. Images are carried through untouched.
@@ -773,14 +784,21 @@ def _propose_metadata(
     cur_title = tags.get("title") or fallback_song
     cur_artist = tags.get("artist") or fallback_artist
 
-    proposed["title"] = lastfm_meta.get("title") or cur_title
-    proposed["artist"] = lastfm_meta.get("artist") or cur_artist
+    proposed["title"] = lastfm_meta.get("title") or deezer_meta_arg.get("title") or cur_title
+    proposed["artist"] = (
+        lastfm_meta.get("artist") or deezer_meta_arg.get("artist") or cur_artist
+    )
     proposed["artists"] = _split_multi_value(proposed["artist"]) or tags.get("artists", [])
     proposed["artist"] = ", ".join(proposed["artists"])
     mb_confident = bool(mb_meta.get("ok") and mb_meta.get("match"))
+    itunes_confident = itunes_meta.get("confidence", 1.0) >= 0.9
+    deezer_confident = deezer_meta_arg.get("confidence", 1.0) >= 0.9
     proposed["album"] = (
         (mb_meta.get("album") if mb_confident else "")
+        or (itunes_meta.get("album") if itunes_confident else "")
+        or (deezer_meta_arg.get("album") if deezer_confident else "")
         or itunes_meta.get("album")
+        or deezer_meta_arg.get("album")
         or lastfm_meta.get("album")
         or discogs_meta.get("album")
         or tags.get("album")
@@ -793,12 +811,18 @@ def _propose_metadata(
         not mb_confident or itunes_meta.get("confidence", 1.0) >= 0.9
     ):
         proposed["genre"] = normalise_genre(itunes_meta["genre"])
+    elif deezer_meta_arg.get("genre") and (
+        not mb_confident or deezer_meta_arg.get("confidence", 1.0) >= 0.9
+    ):
+        proposed["genre"] = normalise_genre(deezer_meta_arg["genre"])
     elif discogs_meta.get("genre"):
         proposed["genre"] = discogs_meta["genre"]
     if mb_confident and mb_meta.get("year"):
         proposed["year"] = mb_meta["year"]
     elif itunes_meta.get("year"):
         proposed["year"] = itunes_meta["year"]
+    elif deezer_meta_arg.get("year"):
+        proposed["year"] = deezer_meta_arg["year"]
     elif discogs_meta.get("year"):
         proposed["year"] = discogs_meta["year"]
     if discogs_meta.get("track_num"):
@@ -812,11 +836,148 @@ def _propose_metadata(
     return proposed
 
 
+_RETAG_ROWS = [
+    ("Title", "title"),
+    ("Artist", "artist"),
+    ("Album", "album"),
+    ("Track", "track_num"),
+    ("Year", "year"),
+    ("Genre", "genre"),
+    ("Composer", "composer"),
+]
+
+_RETAG_LABEL = {field: label for label, field in _RETAG_ROWS}
+
+
+def _group_key(value) -> str:
+    if isinstance(value, int):
+        return str(value)
+    return " ".join(str(value).lower().split())
+
+
+def _retag_field_candidates(
+    tags: dict,
+    proposed: dict,
+    field: str,
+    mb_meta: dict,
+    itunes_meta: dict,
+    deezer_meta_arg: dict,
+    lastfm_meta: dict,
+    discogs_meta: dict,
+) -> dict:
+    """Group the already-fetched provider values for one tag field.
+
+    Returns a dict with:
+      "current"   — what's tagged now,
+      "groups"    — distinct values, each with the providers that returned it
+                    and any caveats (weak match, Discogs data quality),
+      "proposing" — index of the group matching the merged proposal
+                    (None when the proposal came from the existing tags),
+      "disputed"  — True when providers returned more than one distinct value.
+    Groups are ordered so the proposed value comes first.
+    """
+    mb_confident = bool(mb_meta.get("ok") and mb_meta.get("match"))
+    it_caveat = "weak match" if 0 < itunes_meta.get("confidence", 1.0) < 0.9 else ""
+    dz_caveat = (
+        "weak match"
+        if deezer_meta_arg.get("ok") and 0 < deezer_meta_arg.get("confidence", 1.0) < 0.9
+        else ""
+    )
+    dg_quality = discogs_meta.get("data_quality") or ""
+    dg_caveat = dg_quality if dg_quality in ("Needs Vote", "Minimal", "Draft") else ""
+
+    def add(provider, value, caveat=""):
+        if value is None or value == "" or (isinstance(value, (int, float)) and value == 0):
+            return
+        if field == "genre":
+            value = normalise_genre(str(value))
+        pairs.append((provider, value, caveat))
+
+    pairs = []
+    if field == "title":
+        add("Last.fm", lastfm_meta.get("title"))
+        add("Deezer", deezer_meta_arg.get("title"), dz_caveat)
+    elif field == "artist":
+        add("Last.fm", lastfm_meta.get("artist"))
+        add("Deezer", deezer_meta_arg.get("artist"), dz_caveat)
+    elif field in ("album", "year", "genre"):
+        if mb_confident and mb_meta.get(field):
+            add("MusicBrainz", mb_meta.get(field))
+        add("iTunes", itunes_meta.get(field), it_caveat)
+        add("Deezer", deezer_meta_arg.get(field), dz_caveat)
+        if field == "album":
+            add("Last.fm", lastfm_meta.get("album"))
+        add("Discogs", discogs_meta.get(field), dg_caveat)
+    elif field == "track_num":
+        add("Discogs", discogs_meta.get("track_num"), dg_caveat)
+        add("Last.fm", lastfm_meta.get("track_num"))
+    elif field == "composer":
+        add("Discogs", discogs_meta.get("composer"), dg_caveat)
+
+    groups = {}
+    order = []
+    for provider, value, caveat in pairs:
+        key = _group_key(value)
+        if key not in groups:
+            groups[key] = {
+                "value": value,
+                "display": _str_value({field: value}, field),
+                "providers": [],
+                "caveats": [],
+            }
+            order.append(key)
+        g = groups[key]
+        if provider not in g["providers"]:
+            g["providers"].append(provider)
+        if caveat and caveat not in g["caveats"]:
+            g["caveats"].append(caveat)
+
+    group_list = [groups[k] for k in order]
+
+    pv = proposed.get(field)
+    prop_key = None
+    if pv is not None and str(pv).strip() not in ("", "0"):
+        prop_key = _group_key(pv)
+    proposing = None
+    for i, g in enumerate(group_list):
+        if prop_key is not None and _group_key(g["value"]) == prop_key:
+            proposing = i
+            break
+    if proposing is not None and proposing > 0:
+        group_list.insert(0, group_list.pop(proposing))
+        proposing = 0
+
+    return {
+        "current": _str_value(tags, field),
+        "groups": group_list,
+        "proposing": proposing,
+        "disputed": len(group_list) > 1,
+    }
+
+
+def _retag_breakdown_text(cands: dict) -> str:
+    """Render the numbered per-provider breakdown for a disputed field."""
+    lines = []
+    for i, g in enumerate(cands["groups"], 1):
+        src = ", ".join(g["providers"])
+        if g["caveats"]:
+            src += " — " + ", ".join(g["caveats"])
+        lines.append(f"{i}) {escape(g['display'] or '—')}  " + escape(f"[{src}]"))
+    arrow = (
+        f"→ proposing: {cands['proposing'] + 1}"
+        if cands["proposing"] is not None
+        else "→ keeping current"
+    )
+    lines.append(arrow)
+    return "\n".join(lines)
+
+
 def _retag_table(
     tags: dict,
     proposed: dict,
     mb_meta: dict,
     itunes_meta: dict,
+    deezer_meta_arg: dict,
     lastfm_meta: dict,
     discogs_meta: dict,
 ) -> Table:
@@ -826,61 +987,28 @@ def _retag_table(
     table.add_column("Proposed")
     table.add_column("Source", style="dim")
 
-    mb_confident = bool(mb_meta.get("ok") and mb_meta.get("match"))
-
-    rows = [
-        ("Title", "title"),
-        ("Artist", "artist"),
-        ("Album", "album"),
-        ("Track", "track_num"),
-        ("Year", "year"),
-        ("Genre", "genre"),
-        ("Composer", "composer"),
-    ]
-    for label, field in rows:
-        cur = _str_value(tags, field)
+    for label, field in _RETAG_ROWS:
+        cands = _retag_field_candidates(
+            tags, proposed, field, mb_meta, itunes_meta, deezer_meta_arg,
+            lastfm_meta, discogs_meta,
+        )
+        cur = cands["current"]
+        if cands["disputed"]:
+            table.add_row(label, cur or "[dim]—[/dim]", _retag_breakdown_text(cands), "")
+            continue
         prop = _str_value(proposed, field)
         style = "green" if prop and cur == prop else ("yellow" if prop else "dim")
-        source = []
-        if field == "album":
-            if mb_confident and mb_meta.get("album"):
-                source.append("MusicBrainz")
-            if itunes_meta.get("album"):
-                source.append("iTunes")
-            if lastfm_meta.get("album"):
-                source.append("Last.fm")
-            if discogs_meta.get("album"):
-                source.append("Discogs")
-        elif field == "track_num":
-            if discogs_meta.get("track_num"):
-                source.append("Discogs")
-            if lastfm_meta.get("track_num"):
-                source.append("Last.fm")
-        elif field == "composer":
-            if discogs_meta.get("composer"):
-                source.append("Discogs")
-        elif field == "year":
-            if mb_confident and mb_meta.get("year"):
-                source.append("MusicBrainz")
-            if itunes_meta.get("year"):
-                source.append("iTunes")
-            if discogs_meta.get("year"):
-                source.append("Discogs")
-        elif field == "genre":
-            if mb_confident and mb_meta.get("genre"):
-                source.append("MusicBrainz")
-            if itunes_meta.get("genre"):
-                source.append("iTunes")
-            if discogs_meta.get("genre"):
-                source.append("Discogs")
-        elif field in ("title", "artist"):
-            if lastfm_meta.get(field):
-                source.append("Last.fm")
+        source = ""
+        if cands["groups"]:
+            g = cands["groups"][0]
+            source = ", ".join(g["providers"])
+            if g["caveats"]:
+                source += " — " + ", ".join(g["caveats"])
         table.add_row(
             label,
             cur or "[dim]—[/dim]",
-            f"[{style}]{prop or '—'}[/{style}]",
-            ", ".join(source),
+            f"[{style}]{escape(prop) or '—'}[/{style}]",
+            source,
         )
 
     if mb_meta.get("ok") and mb_meta.get("match"):
@@ -912,12 +1040,12 @@ def _retag_table(
             mb_meta["error"],
         )
 
-    if itunes_meta.get("confidence", 0.0) > 0 and itunes_meta["confidence"] < 0.9:
+    if not deezer_meta_arg.get("ok") and deezer_meta_arg.get("error"):
         table.add_row(
-            "⚠ iTunes match",
+            "⚠ Deezer lookup",
             "",
-            "[yellow]weak[/yellow]",
-            "low confidence on the iTunes result",
+            "[yellow]unavailable[/yellow]",
+            deezer_meta_arg["error"],
         )
 
     if lastfm_meta.get("toptags"):
@@ -955,36 +1083,92 @@ def _retag_table(
     return table
 
 
-def _retag_prompt_fields(proposed: dict) -> dict:
-    """Let the user edit the proposed metadata field by field."""
-    proposed["title"] = _prompt("Title", default=proposed.get("title") or "")
-    proposed["artist"] = _prompt("Artist", default=proposed.get("artist") or "")
-    proposed["artists"] = [proposed["artist"]] if proposed["artist"] else []
-    proposed["album"] = _prompt("Album", default=proposed.get("album") or "")
-    proposed["track_num"] = _prompt(
-        "Track number", default=proposed.get("track_num") or 0, type=int
+def _retag_action(choice: str) -> str | None:
+    """Classify the retag prompt input.
+
+    Returns "yes", "skip", a field name, or None when unknown. Fields can be
+    given by number (1-7) or by full name / unique prefix.
+    """
+    c = (choice or "").strip().lower()
+    if c in ("", "y", "yes"):
+        return "yes"
+    if c in ("s", "skip"):
+        return "skip"
+    if c.isdigit():
+        i = int(c)
+        return _RETAG_ROWS[i - 1][1] if 1 <= i <= len(_RETAG_ROWS) else None
+    for label, field in _RETAG_ROWS:
+        if c == field or c == label.lower():
+            return field
+    matches = [
+        field
+        for label, field in _RETAG_ROWS
+        if field.startswith(c) or label.lower().startswith(c)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _retag_prompt_field(
+    tags: dict,
+    proposed: dict,
+    field: str,
+    mb_meta: dict,
+    itunes_meta: dict,
+    deezer_meta_arg: dict,
+    lastfm_meta: dict,
+    discogs_meta: dict,
+) -> dict:
+    """Pick or type one tag field, returning the updated proposal."""
+    cands = _retag_field_candidates(
+        tags, proposed, field, mb_meta, itunes_meta, deezer_meta_arg,
+        lastfm_meta, discogs_meta,
     )
-    proposed["disc_num"] = _prompt(
-        "Disc number", default=proposed.get("disc_num") or 0, type=int
-    )
+    label = _RETAG_LABEL[field]
+    total = len(cands["groups"])
     while True:
-        year_raw = _prompt(
-            "Year", default=proposed.get("year") or "", type=str, show_default=False
+        console.print(f"[bold]{label}[/bold] options:")
+        for i, g in enumerate(cands["groups"], 1):
+            src = ", ".join(g["providers"])
+            if g["caveats"]:
+                src += " — " + ", ".join(g["caveats"])
+            console.print(
+                f"  {i}) {escape(g['display'] or '—')}  "
+                + escape(f"[{src}]")
+            )
+        console.print(
+            f"[dim]  current: {escape(cands['current']) or '—'}[/dim]"
+        )
+        entry = _prompt(
+            f"Option 1-{total} (0 = keep current) or type a value",
+            default="",
+            type=str,
+            show_default=False,
         ).strip()
-        if not year_raw:
-            proposed["year"] = ""
-            break
-        if year_raw.isdigit():
-            proposed["year"] = str(int(year_raw))
-            break
-        console.print("[yellow]⚠ Invalid year — enter a number or press Enter to skip[/yellow]")
-    proposed["genre"] = _prompt(
-        "Genre", default=proposed.get("genre") or "", type=str, show_default=False
-    ).strip()
-    proposed["composer"] = _prompt(
-        "Composer", default=proposed.get("composer") or "", type=str, show_default=False
-    ).strip()
-    return proposed
+        if entry == "":
+            return proposed
+        if entry == "0":
+            value = tags.get(field)
+            proposed[field] = value
+            if field == "artist":
+                proposed["artists"] = _split_multi_value(proposed["artist"]) or []
+                proposed["artist"] = ", ".join(proposed["artists"])
+            return proposed
+        if entry.isdigit() and 1 <= int(entry) <= total:
+            proposed[field] = cands["groups"][int(entry) - 1]["value"]
+            if field == "artist":
+                proposed["artists"] = _split_multi_value(proposed["artist"]) or []
+                proposed["artist"] = ", ".join(proposed["artists"])
+            return proposed
+        if field in ("year", "track_num"):
+            if entry.isdigit():
+                proposed[field] = str(int(entry)) if field == "year" else int(entry)
+                return proposed
+            console.print("[yellow]⚠ Invalid value — enter a number or pick an option[/yellow]")
+            continue
+        proposed[field] = entry
+        if field == "artist":
+            proposed["artists"] = [entry]
+        return proposed
 
 
 @cli.command("duplicates")

@@ -37,6 +37,11 @@ cross-check via autocorrect + genre tags). It can also be set as the
 `LASTFM_API_KEY` env var, which takes priority. Without it, `musiq retag`
 just skips Last.fm and uses iTunes.
 
+Deezer (also used by `musiq retag`) needs no key — its public API serves
+album/genre/year for the best artist+title hit. It sits alongside iTunes as
+a fallback metadata source, and its match is confidence-gated: a confident
+Deezer hit displaces a weak iTunes album pick.
+
 MusicBrainz (also used by `musiq retag`) needs no key — a polite
 User-Agent is enough. It resolves recordings by artist MBID + title instead
 of string matching, so it's the source used to disambiguate album/year when
@@ -160,6 +165,7 @@ musiq/
 │   ├── cli.py          # click commands
 │   ├── spotify.py      # __NEXT_DATA__ scraper + Spotify search
 │   ├── itunes.py       # iTunes Search API client
+│   ├── deezer.py       # Deezer public API client (retag: album/genre/year)
 │   ├── lastfm.py       # Last.fm API client (retag metadata source)
 │   ├── musicbrainz.py  # MusicBrainz client (confirm_metadata + retag recording lookup)
 │   ├── discogs.py      # Discogs API client (retag: track positions, composers)
