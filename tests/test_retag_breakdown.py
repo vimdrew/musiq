@@ -94,6 +94,40 @@ def _providers_you_was_right():
 _WY = dict(TAGS, album="You Was Right - Single", title="You Was Right")
 
 
+def _providers_now():
+    """MB unavailable; iTunes weak (all its values) vs Deezer confident.
+
+    Real "Now (feat. 21 Savage)" — Young Thug: iTunes confidence 0.19
+    ("beerbongs & bentleys", 2017, Hip-Hop/Rap), Deezer 1.0 ("Hear No
+    Evil", 2018, Rap/Hip Hop).
+    """
+    mb = {
+        "ok": False, "error": "no matching recording", "album": "", "year": "",
+        "genre": "", "match": False, "reason": "", "candidates": 0,
+        "rg_title": "", "release_title": "", "primary_type": "",
+        "secondary_types": [], "first_release_date": "", "recording_title": "",
+    }
+    itunes = {
+        "genre": "Hip-Hop/Rap", "year": "2017", "artwork_url": "",
+        "album": "beerbongs & bentleys", "confidence": 0.19047619047619047,
+    }
+    deezer = {
+        "ok": True, "confidence": 1.0, "title": "Now (feat. 21 Savage)",
+        "artist": "Young Thug", "album": "Hear No Evil", "year": "2018",
+        "genre": "Rap/Hip Hop", "track_num": 0, "duration_ms": 204000,
+        "artwork_url": "", "id": "130917062", "url": "", "error": "",
+    }
+    lastfm = {
+        "title": "", "artist": "", "album": "Hear No Evil - Single",
+        "track_num": 0, "duration_ms": 204000, "toptags": [],
+        "mbid": "", "url": "",
+    }
+    return mb, itunes, deezer, lastfm
+
+
+_NOW = dict(TAGS, album="Now (feat. 21 Savage) - Single", title="Now (feat. 21 Savage)")
+
+
 class RetagDisagreementTest(unittest.TestCase):
     def test_album_disagreement_surfaces(self):
         mb, itunes, deezer, lastfm = _providers_wyclef()
@@ -119,7 +153,7 @@ class RetagDisagreementTest(unittest.TestCase):
         self.assertEqual(cands["proposing"], 0)
         self.assertEqual(cands["groups"][0]["display"], "JEFFERY")
 
-    def test_you_was_right_album_and_year_disagree(self):
+    def test_you_was_right_deezer_wins_when_mb_unavailable(self):
         mb, itunes, deezer, lastfm = _providers_you_was_right()
         proposed = _propose_metadata(
             dict(_WY), mb, itunes, deezer, lastfm, "You Was Right", "Lil Uzi Vert"
@@ -135,7 +169,58 @@ class RetagDisagreementTest(unittest.TestCase):
             self.assertEqual(
                 {g["display"] for g in cands["groups"]}, expected_set
             )
-        self.assertEqual(proposed["album"], "Luv Is Rage 2")
+        self.assertEqual(proposed["album"], "Lil Uzi Vert vs. The World")
+        self.assertEqual(proposed["year"], "2016")
+
+    def test_now_weak_itunes_loses_to_confident_deezer_for_all_fields(self):
+        mb, itunes, deezer, lastfm = _providers_now()
+        proposed = _propose_metadata(
+            dict(_NOW), mb, itunes, deezer, lastfm,
+            "Now (feat. 21 Savage)", "Young Thug",
+        )
+        self.assertEqual(proposed["album"], "Hear No Evil")
+        self.assertEqual(proposed["year"], "2018")
+        self.assertEqual(proposed["genre"], "Rap/Hip Hop")
+        for field, proposal, expected_groups, disputed in (
+            ("year", "2018", {"2018", "2017"}, True),
+            ("genre", "Rap/Hip Hop", {"Rap/Hip Hop", "Hip-Hop"}, False),
+            ("album", "Hear No Evil",
+             {"Hear No Evil", "Hear No Evil - Single", "beerbongs & bentleys"}, True),
+        ):
+            cands = _retag_field_candidates(
+                _NOW, proposed, field, mb, itunes, deezer, lastfm
+            )
+            self.assertEqual(cands["disputed"], disputed, field)
+            self.assertEqual(
+                {g["display"] for g in cands["groups"]}, expected_groups
+            )
+            proposing = cands["groups"][cands["proposing"]]["display"]
+            self.assertEqual(proposing, proposal)
+
+    def test_now_weak_itunes_still_shown_as_alternative(self):
+        mb, itunes, deezer, lastfm = _providers_now()
+        proposed = _propose_metadata(
+            dict(_NOW), mb, itunes, deezer, lastfm,
+            "Now (feat. 21 Savage)", "Young Thug",
+        )
+        cands = _retag_field_candidates(
+            _NOW, proposed, "year", mb, itunes, deezer, lastfm
+        )
+        by_value = {g["display"]: g for g in cands["groups"]}
+        self.assertIn("weak match", by_value["2017"]["caveats"])
+        self.assertEqual(by_value["2017"]["providers"], ["iTunes"])
+        self.assertEqual(by_value["2018"]["caveats"], [])
+        self.assertEqual(cands["groups"][cands["proposing"]]["display"], "2018")
+
+    def test_weak_value_is_fallback_only_when_nothing_stronger(self):
+        mb, itunes, deezer, lastfm = _providers_now()
+        deezer = {"ok": False, "confidence": 0.0, "error": "unavailable"}
+        proposed = _propose_metadata(
+            dict(_NOW), mb, itunes, deezer, lastfm,
+            "Now (feat. 21 Savage)", "Young Thug",
+        )
+        self.assertEqual(proposed["year"], "2017")
+        self.assertEqual(proposed["genre"], "Hip-Hop")
 
     def test_near_similar_genres_collapse(self):
         mb, itunes, deezer, lastfm = _providers_you_was_right()

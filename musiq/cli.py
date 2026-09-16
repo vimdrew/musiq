@@ -763,6 +763,20 @@ def _field_changed(current: dict, proposed: dict, field: str) -> bool:
     return bool(p and c != p)
 
 
+def _fallback_first(strong: list[str], weak: list[str]) -> str:
+    """First non-empty candidate, never defaulting to a weak match.
+
+    iTunes/Deezer values whose search confidence is < 0.9 are weak matches;
+    such a candidate is only proposed when nothing stronger contributes the
+    same field. Within a tier, list order is the priority (MusicBrainz
+    first, then Deezer over iTunes, then Last.fm and the existing tags).
+    """
+    for value in (*strong, *weak):
+        if value:
+            return value
+    return ""
+
+
 def _propose_metadata(
     tags: dict,
     mb_meta: dict,
@@ -775,11 +789,12 @@ def _propose_metadata(
     """Merge the best available metadata into a proposed tag set.
 
     Details wins over broad strokes: MusicBrainz for album/year/genre when
-    it has a confident release-group match (MBID-keyed, unambiguous), iTunes
-    and Deezer for album/year/genre as the fallback, Last.fm for artist/title
+    it has a confident release-group match (MBID-keyed, unambiguous), Deezer
+    preferred over iTunes as the fallback, Last.fm for artist/title
     cross-check via autocorrect and the track position, and existing values
-    are kept when a source has nothing to add. Images are carried through
-    untouched.
+    are kept when a source has nothing to add. A weak-match source is never
+    the default while a stronger value exists for the same field. Images
+    are carried through untouched.
     """
     proposed = {k: v for k, v in tags.items() if k != "images"}
     cur_title = tags.get("title") or fallback_song
@@ -794,33 +809,41 @@ def _propose_metadata(
     mb_confident = bool(mb_meta.get("ok") and mb_meta.get("match"))
     itunes_confident = itunes_meta.get("confidence", 1.0) >= 0.9
     deezer_confident = deezer_meta_arg.get("confidence", 1.0) >= 0.9
-    proposed["album"] = (
-        (mb_meta.get("album") if mb_confident else "")
-        or (itunes_meta.get("album") if itunes_confident else "")
-        or (deezer_meta_arg.get("album") if deezer_confident else "")
-        or itunes_meta.get("album")
-        or deezer_meta_arg.get("album")
-        or lastfm_meta.get("album")
-        or tags.get("album")
-        or cur_title
+
+    dz_album = deezer_meta_arg.get("album") or ""
+    it_album = itunes_meta.get("album") or ""
+    dz_genre = normalise_genre(deezer_meta_arg["genre"]) if deezer_meta_arg.get("genre") else ""
+    it_genre = normalise_genre(itunes_meta["genre"]) if itunes_meta.get("genre") else ""
+    dz_year = deezer_meta_arg.get("year") or ""
+    it_year = itunes_meta.get("year") or ""
+
+    proposed["album"] = _fallback_first(
+        [
+            mb_meta.get("album") if mb_confident else "",
+            dz_album if deezer_confident else "",
+            it_album if itunes_confident else "",
+            lastfm_meta.get("album") or "",
+            tags.get("album") or "",
+            cur_title,
+        ],
+        [dz_album, it_album],
     )
-    mb_genre = mb_meta.get("genre") if mb_confident else ""
-    if mb_genre:
-        proposed["genre"] = normalise_genre(mb_genre)
-    elif itunes_meta.get("genre") and (
-        not mb_confident or itunes_meta.get("confidence", 1.0) >= 0.9
-    ):
-        proposed["genre"] = normalise_genre(itunes_meta["genre"])
-    elif deezer_meta_arg.get("genre") and (
-        not mb_confident or deezer_meta_arg.get("confidence", 1.0) >= 0.9
-    ):
-        proposed["genre"] = normalise_genre(deezer_meta_arg["genre"])
-    if mb_confident and mb_meta.get("year"):
-        proposed["year"] = mb_meta["year"]
-    elif itunes_meta.get("year"):
-        proposed["year"] = itunes_meta["year"]
-    elif deezer_meta_arg.get("year"):
-        proposed["year"] = deezer_meta_arg["year"]
+    proposed["genre"] = _fallback_first(
+        [
+            normalise_genre(mb_meta["genre"]) if mb_confident and mb_meta.get("genre") else "",
+            dz_genre if deezer_confident else "",
+            it_genre if itunes_confident else "",
+        ],
+        [dz_genre, it_genre],
+    )
+    proposed["year"] = _fallback_first(
+        [
+            mb_meta.get("year") if mb_confident else "",
+            dz_year if deezer_confident else "",
+            it_year if itunes_confident else "",
+        ],
+        [dz_year, it_year],
+    )
     if lastfm_meta.get("track_num"):
         proposed["track_num"] = lastfm_meta["track_num"]
 
