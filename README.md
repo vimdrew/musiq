@@ -28,8 +28,6 @@ the Spotify/Navidrome credentials:
 
 ```ini
 LASTFM_API_KEY=your-lastfm-api-key
-DISCOGS_KEY=your-discogs-consumer-key
-DISCOGS_SECRET=your-discogs-consumer-secret
 ```
 
 Last.fm is used by `musiq retag` as a second metadata source (title/artist
@@ -51,13 +49,6 @@ confident match: a release-group matching your current album tag, else a
 clean `Album` release-group (no Live/Compilation/Remix secondary types),
 earliest release first. Genre is left to iTunes unless MusicBrainz itself
 carries one.
-
-Discogs (also used by `musiq retag`) needs its consumer key + secret from
-<https://www.discogs.com/settings/developers> — search and cover-image URLs
-require them. `DISCOGS_TOKEN` (a personal access token) is accepted instead
-and takes priority. Discogs supplies the track position and composer
-credits (written-by) that iTunes and Last.fm never return, plus genres,
-styles, and the exact release year.
 
 ## Install
 
@@ -168,7 +159,6 @@ musiq/
 │   ├── deezer.py       # Deezer public API client (retag: album/genre/year)
 │   ├── lastfm.py       # Last.fm API client (retag metadata source)
 │   ├── musicbrainz.py  # MusicBrainz client (confirm_metadata + retag recording lookup)
-│   ├── discogs.py      # Discogs API client (retag: track positions, composers)
 │   ├── ytmusic.py      # ytmusicapi wrapper for YT Music search
 │   ├── downloader.py   # yt-dlp wrapper + pipeline orchestrator
 │   ├── tagger.py       # eyeD3 ID3 + cover art writer

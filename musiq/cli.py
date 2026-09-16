@@ -1,4 +1,5 @@
 import difflib
+import re
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,6 @@ from rich.table import Table
 
 from musiq.display import console, summary_table, stats_table
 from musiq.deezer import fetch_track_metadata as deezer_meta
-from musiq.discogs import fetch_track_metadata as discogs_meta
 from musiq.downloader import (
     handle_url, handle_search_selection, process_track, _ytm_download,
     _build_ydl_opts,
@@ -664,12 +664,12 @@ def edit(query: tuple[str, ...]):
 def retag(query: tuple[str, ...]):
     """Fetch metadata for a track and fix its ID3 tags.
 
-    Looks the track up in MusicBrainz, iTunes, Deezer, Last.fm and Discogs
+    Looks the track up in MusicBrainz, iTunes, Deezer and Last.fm
     (artist/title based), shows what each source returns versus what's
-    tagged now. When sources disagree it shows a numbered breakdown per
-    field (with any weak-match / data-quality caveats) and lets you pick
-    an alternative or type a value per field — or press Enter to accept the
-    proposal and write the tags. Cover art is left untouched.
+    tagged now. When sources genuinely disagree on a field it shows the
+    alternatives inline; edit a field by letter (a-g) and name to see its
+    candidates numbered and pick one — or press Enter to accept the proposal
+    and write the tags. Cover art is left untouched.
     """
     q = " ".join(query)
     music_dir = _music_dir()
@@ -695,12 +695,9 @@ def retag(query: tuple[str, ...]):
     itunes_meta = fetch_metadata(cur_artist, cur_title)
     dz = deezer_meta(cur_artist, cur_title)
     lastfm_meta = fetch_track_info(cur_artist, cur_title)
-    dg = discogs_meta(
-        cur_artist, cur_title, tags.get("album") or album, tags.get("year") or ""
-    )
     mb = recording_metadata(cur_artist, cur_title, tags.get("album") or album)
 
-    proposed = _propose_metadata(tags, mb, itunes_meta, dz, lastfm_meta, dg, song, artist)
+    proposed = _propose_metadata(tags, mb, itunes_meta, dz, lastfm_meta, song, artist)
 
     changed = [
         f
@@ -714,9 +711,9 @@ def retag(query: tuple[str, ...]):
         return
 
     while True:
-        console.print(_retag_table(tags, proposed, mb, itunes_meta, dz, lastfm_meta, dg))
+        console.print(_retag_table(tags, proposed, mb, itunes_meta, dz, lastfm_meta))
         choice = _prompt(
-            "Accept [yes] / skip / edit a field (1-7 or name)",
+            "Accept [yes] / skip / edit a field (a-g or name)",
             default="yes",
             show_default=True,
         ).strip()
@@ -727,10 +724,15 @@ def retag(query: tuple[str, ...]):
             console.print("[yellow]Skipped[/yellow]")
             return
         if action is None:
-            console.print("[yellow]Unknown choice — use yes, skip, or a field name/number[/yellow]")
+            hint = (
+                "numbers pick a candidate — choose a field letter/name first"
+                if choice.strip().isdigit()
+                else "use yes, skip, or a field letter/name"
+            )
+            console.print(f"[yellow]Unknown choice — {hint}[/yellow]")
             continue
         proposed = _retag_prompt_field(
-            tags, proposed, action, mb, itunes_meta, dz, lastfm_meta, dg
+            tags, proposed, action, mb, itunes_meta, dz, lastfm_meta
         )
 
     try:
@@ -767,7 +769,6 @@ def _propose_metadata(
     itunes_meta: dict,
     deezer_meta_arg: dict,
     lastfm_meta: dict,
-    discogs_meta: dict,
     fallback_song: str,
     fallback_artist: str,
 ) -> dict:
@@ -776,9 +777,9 @@ def _propose_metadata(
     Details wins over broad strokes: MusicBrainz for album/year/genre when
     it has a confident release-group match (MBID-keyed, unambiguous), iTunes
     and Deezer for album/year/genre as the fallback, Last.fm for artist/title
-    cross-check via autocorrect, Discogs for track position and per-track
-    composer credits, and existing values are kept when a source has nothing
-    to add. Images are carried through untouched.
+    cross-check via autocorrect and the track position, and existing values
+    are kept when a source has nothing to add. Images are carried through
+    untouched.
     """
     proposed = {k: v for k, v in tags.items() if k != "images"}
     cur_title = tags.get("title") or fallback_song
@@ -800,7 +801,6 @@ def _propose_metadata(
         or itunes_meta.get("album")
         or deezer_meta_arg.get("album")
         or lastfm_meta.get("album")
-        or discogs_meta.get("album")
         or tags.get("album")
         or cur_title
     )
@@ -815,22 +815,14 @@ def _propose_metadata(
         not mb_confident or deezer_meta_arg.get("confidence", 1.0) >= 0.9
     ):
         proposed["genre"] = normalise_genre(deezer_meta_arg["genre"])
-    elif discogs_meta.get("genre"):
-        proposed["genre"] = discogs_meta["genre"]
     if mb_confident and mb_meta.get("year"):
         proposed["year"] = mb_meta["year"]
     elif itunes_meta.get("year"):
         proposed["year"] = itunes_meta["year"]
     elif deezer_meta_arg.get("year"):
         proposed["year"] = deezer_meta_arg["year"]
-    elif discogs_meta.get("year"):
-        proposed["year"] = discogs_meta["year"]
-    if discogs_meta.get("track_num"):
-        proposed["track_num"] = discogs_meta["track_num"]
-    elif lastfm_meta.get("track_num"):
+    if lastfm_meta.get("track_num"):
         proposed["track_num"] = lastfm_meta["track_num"]
-    if discogs_meta.get("composer"):
-        proposed["composer"] = discogs_meta["composer"]
 
     proposed["images"] = tags.get("images", [])
     return proposed
@@ -846,13 +838,45 @@ _RETAG_ROWS = [
     ("Composer", "composer"),
 ]
 
+_RETAG_LETTERS = "abcdefghij"
 _RETAG_LABEL = {field: label for label, field in _RETAG_ROWS}
+
+
+def _retag_letter(field: str) -> str:
+    for i, (_label, f) in enumerate(_RETAG_ROWS):
+        if f == field:
+            return _RETAG_LETTERS[i]
+    return ""
 
 
 def _group_key(value) -> str:
     if isinstance(value, int):
         return str(value)
     return " ".join(str(value).lower().split())
+
+
+def _tag_tokens(value) -> frozenset[str]:
+    return frozenset(re.findall(r"[a-z0-9]+", str(value).lower()))
+
+
+def _is_disputed(group_list: list[dict]) -> bool:
+    """True only for meaningful disagreements.
+
+    Near-duplicate values (case/whitespace/punctuation variance, word order,
+    genre aliases like "Rap/Hip Hop" vs "Hip-Hop/Rap", "(Deluxe)" suffixes)
+    collapse into a single compact proposal line; a breakdown only surfaces
+    when sources actually disagree on the value of a tag.
+    """
+    if len(group_list) < 2:
+        return False
+    sets = [_tag_tokens(g["value"]) for g in group_list]
+    sets = [s for s in sets if s]
+    for i in range(len(sets)):
+        for j in range(i + 1, len(sets)):
+            union = len(sets[i] | sets[j])
+            if union and len(sets[i] & sets[j]) / union < 0.5:
+                return True
+    return False
 
 
 def _retag_field_candidates(
@@ -863,28 +887,25 @@ def _retag_field_candidates(
     itunes_meta: dict,
     deezer_meta_arg: dict,
     lastfm_meta: dict,
-    discogs_meta: dict,
 ) -> dict:
     """Group the already-fetched provider values for one tag field.
 
     Returns a dict with:
       "current"   — what's tagged now,
       "groups"    — distinct values, each with the providers that returned it
-                    and any caveats (weak match, Discogs data quality),
+                    and any caveats (weak match),
       "proposing" — index of the group matching the merged proposal
                     (None when the proposal came from the existing tags),
-      "disputed"  — True when providers returned more than one distinct value.
+      "disputed"  — True when sources meaningfully disagree (see
+                    ``_is_disputed``).
     Groups are ordered so the proposed value comes first.
     """
-    mb_confident = bool(mb_meta.get("ok") and mb_meta.get("match"))
     it_caveat = "weak match" if 0 < itunes_meta.get("confidence", 1.0) < 0.9 else ""
     dz_caveat = (
         "weak match"
         if deezer_meta_arg.get("ok") and 0 < deezer_meta_arg.get("confidence", 1.0) < 0.9
         else ""
     )
-    dg_quality = discogs_meta.get("data_quality") or ""
-    dg_caveat = dg_quality if dg_quality in ("Needs Vote", "Minimal", "Draft") else ""
 
     def add(provider, value, caveat=""):
         if value is None or value == "" or (isinstance(value, (int, float)) and value == 0):
@@ -901,18 +922,14 @@ def _retag_field_candidates(
         add("Last.fm", lastfm_meta.get("artist"))
         add("Deezer", deezer_meta_arg.get("artist"), dz_caveat)
     elif field in ("album", "year", "genre"):
-        if mb_confident and mb_meta.get(field):
+        if mb_meta.get("ok") and mb_meta.get("match") and mb_meta.get(field):
             add("MusicBrainz", mb_meta.get(field))
         add("iTunes", itunes_meta.get(field), it_caveat)
         add("Deezer", deezer_meta_arg.get(field), dz_caveat)
         if field == "album":
             add("Last.fm", lastfm_meta.get("album"))
-        add("Discogs", discogs_meta.get(field), dg_caveat)
     elif field == "track_num":
-        add("Discogs", discogs_meta.get("track_num"), dg_caveat)
         add("Last.fm", lastfm_meta.get("track_num"))
-    elif field == "composer":
-        add("Discogs", discogs_meta.get("composer"), dg_caveat)
 
     groups = {}
     order = []
@@ -951,24 +968,24 @@ def _retag_field_candidates(
         "current": _str_value(tags, field),
         "groups": group_list,
         "proposing": proposing,
-        "disputed": len(group_list) > 1,
+        "disputed": _is_disputed(group_list),
     }
 
 
 def _retag_breakdown_text(cands: dict) -> str:
-    """Render the numbered per-provider breakdown for a disputed field."""
+    """Render the candidate alternatives for a disputed field.
+
+    Numbers are reserved for the per-field picker, so the inline breakdown
+    marks the proposed value with an arrow instead of renumbering everything.
+    """
     lines = []
+    proposing = cands["proposing"]
     for i, g in enumerate(cands["groups"], 1):
         src = ", ".join(g["providers"])
         if g["caveats"]:
             src += " — " + ", ".join(g["caveats"])
-        lines.append(f"{i}) {escape(g['display'] or '—')}  " + escape(f"[{src}]"))
-    arrow = (
-        f"→ proposing: {cands['proposing'] + 1}"
-        if cands["proposing"] is not None
-        else "→ keeping current"
-    )
-    lines.append(arrow)
+        mark = "[green]→[/green] " if proposing is not None and i == proposing + 1 else "  "
+        lines.append(mark + escape(g["display"] or "—") + "  " + escape(f"[{src}]"))
     return "\n".join(lines)
 
 
@@ -979,7 +996,6 @@ def _retag_table(
     itunes_meta: dict,
     deezer_meta_arg: dict,
     lastfm_meta: dict,
-    discogs_meta: dict,
 ) -> Table:
     table = Table(box=box.ROUNDED, title="Retag — proposed metadata")
     table.add_column("Field", style="bold cyan")
@@ -990,11 +1006,12 @@ def _retag_table(
     for label, field in _RETAG_ROWS:
         cands = _retag_field_candidates(
             tags, proposed, field, mb_meta, itunes_meta, deezer_meta_arg,
-            lastfm_meta, discogs_meta,
+            lastfm_meta,
         )
         cur = cands["current"]
+        field_cell = f"{_retag_letter(field)}) {label}"
         if cands["disputed"]:
-            table.add_row(label, cur or "[dim]—[/dim]", _retag_breakdown_text(cands), "")
+            table.add_row(field_cell, cur or "[dim]—[/dim]", _retag_breakdown_text(cands), "")
             continue
         prop = _str_value(proposed, field)
         style = "green" if prop and cur == prop else ("yellow" if prop else "dim")
@@ -1005,7 +1022,7 @@ def _retag_table(
             if g["caveats"]:
                 source += " — " + ", ".join(g["caveats"])
         table.add_row(
-            label,
+            field_cell,
             cur or "[dim]—[/dim]",
             f"[{style}]{escape(prop) or '—'}[/{style}]",
             source,
@@ -1056,54 +1073,31 @@ def _retag_table(
             "Last.fm (no tag applied)",
         )
 
-    if discogs_meta.get("styles"):
-        table.add_row(
-            "Discogs styles",
-            "",
-            "[dim]" + ", ".join(discogs_meta["styles"][:6]) + "[/dim]",
-            "Discogs (no tag applied)",
-        )
-
-    if discogs_meta.get("ok") and discogs_meta.get("data_quality") in ("Needs Vote", "Minimal", "Draft"):
-        table.add_row(
-            "⚠ Discogs record",
-            "",
-            "[yellow]" + discogs_meta["data_quality"] + "[/yellow]",
-            "entry may be incomplete",
-        )
-
-    if not discogs_meta.get("ok") and discogs_meta.get("error"):
-        table.add_row(
-            "⚠ Discogs lookup",
-            "",
-            "[yellow]unavailable[/yellow]",
-            discogs_meta["error"],
-        )
-
     return table
 
 
 def _retag_action(choice: str) -> str | None:
     """Classify the retag prompt input.
 
-    Returns "yes", "skip", a field name, or None when unknown. Fields can be
-    given by number (1-7) or by full name / unique prefix.
+    Returns "yes", "skip", a field name, or None when unknown. Fields are
+    picked by letter (a-g, shown in the table) or by full name / unique
+    prefix. Numbers are reserved for picking a candidate *inside* a field,
+    so they're rejected here.
     """
     c = (choice or "").strip().lower()
     if c in ("", "y", "yes"):
         return "yes"
     if c in ("s", "skip"):
         return "skip"
-    if c.isdigit():
-        i = int(c)
-        return _RETAG_ROWS[i - 1][1] if 1 <= i <= len(_RETAG_ROWS) else None
+    if len(c) == 1 and c in _RETAG_LETTERS[: len(_RETAG_ROWS)]:
+        return _RETAG_ROWS[_RETAG_LETTERS.index(c)][1]
     for label, field in _RETAG_ROWS:
         if c == field or c == label.lower():
             return field
     matches = [
         field
         for label, field in _RETAG_ROWS
-        if field.startswith(c) or label.lower().startswith(c)
+        if len(c) >= 2 and (field.startswith(c) or label.lower().startswith(c))
     ]
     return matches[0] if len(matches) == 1 else None
 
@@ -1116,17 +1110,16 @@ def _retag_prompt_field(
     itunes_meta: dict,
     deezer_meta_arg: dict,
     lastfm_meta: dict,
-    discogs_meta: dict,
 ) -> dict:
     """Pick or type one tag field, returning the updated proposal."""
     cands = _retag_field_candidates(
         tags, proposed, field, mb_meta, itunes_meta, deezer_meta_arg,
-        lastfm_meta, discogs_meta,
+        lastfm_meta,
     )
     label = _RETAG_LABEL[field]
     total = len(cands["groups"])
     while True:
-        console.print(f"[bold]{label}[/bold] options:")
+        console.print(f"[bold]{_retag_letter(field)}) {label}[/bold] — pick a candidate:")
         for i, g in enumerate(cands["groups"], 1):
             src = ", ".join(g["providers"])
             if g["caveats"]:
@@ -1139,7 +1132,9 @@ def _retag_prompt_field(
             f"[dim]  current: {escape(cands['current']) or '—'}[/dim]"
         )
         entry = _prompt(
-            f"Option 1-{total} (0 = keep current) or type a value",
+            f"Option 1-{total} (0 = keep current) or type a value"
+            if total
+            else "No candidates — type a value (0 = keep current)",
             default="",
             type=str,
             show_default=False,
