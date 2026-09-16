@@ -24,6 +24,7 @@ from rich.console import Console
 from musiq.cli import (
     _propose_metadata,
     _retag_action,
+    _retag_breakdown_text,
     _retag_field_candidates,
     _retag_prompt_field,
     _retag_table,
@@ -128,6 +129,40 @@ def _providers_now():
 _NOW = dict(TAGS, album="Now (feat. 21 Savage) - Single", title="Now (feat. 21 Savage)")
 
 
+def _providers_do_for_love():
+    """MB unavailable; iTunes year weak (2015) vs confident Deezer (2011).
+
+    The file's own year tag is 1997 — which no provider returns — so a
+    "keep current" override has to surface 1997 itself in the breakdown.
+    """
+    mb = {
+        "ok": False, "error": "no matching recording", "album": "", "year": "",
+        "genre": "", "match": False, "reason": "", "candidates": 0,
+        "rg_title": "", "release_title": "", "primary_type": "",
+        "secondary_types": [], "first_release_date": "", "recording_title": "",
+    }
+    itunes = {
+        "genre": "Hip-Hop/Rap", "year": "2015", "artwork_url": "",
+        "album": "The Very Best Of 2pac", "confidence": 0.4,
+    }
+    deezer = {
+        "ok": True, "confidence": 1.0, "title": "Do For Love",
+        "artist": "2Pac", "album": "R U Still Down? [Remember Me]",
+        "year": "2011", "genre": "Rap/Hip Hop", "track_num": 3,
+        "duration_ms": 285000, "artwork_url": "", "id": "130917162",
+        "url": "", "error": "",
+    }
+    lastfm = {
+        "title": "", "artist": "", "album": "R U Still Down? [Remember Me]",
+        "track_num": 3, "duration_ms": 285000, "toptags": [],
+        "mbid": "", "url": "",
+    }
+    return mb, itunes, deezer, lastfm
+
+
+_DFL = dict(TAGS, album="Do For Love - Single", title="Do For Love", year="1997")
+
+
 class RetagDisagreementTest(unittest.TestCase):
     def test_album_disagreement_surfaces(self):
         mb, itunes, deezer, lastfm = _providers_wyclef()
@@ -221,6 +256,54 @@ class RetagDisagreementTest(unittest.TestCase):
         )
         self.assertEqual(proposed["year"], "2017")
         self.assertEqual(proposed["genre"], "Hip-Hop")
+
+    def test_keep_current_marks_existing_tag_with_arrowed_kept_line(self):
+        mb, itunes, deezer, lastfm = _providers_do_for_love()
+        proposed = _propose_metadata(
+            dict(_DFL), mb, itunes, deezer, lastfm, "Do For Love", "2Pac"
+        )
+        self.assertEqual(proposed["year"], "2011")
+        proposed["year"] = _DFL["year"]
+        cands = _retag_field_candidates(
+            _DFL, proposed, "year", mb, itunes, deezer, lastfm
+        )
+        self.assertTrue(cands["disputed"])
+        self.assertTrue(cands["kept"])
+        self.assertEqual(cands["groups"][cands["proposing"]]["display"], "1997")
+        text = _retag_breakdown_text(cands)
+        self.assertIn("1997", text)
+        self.assertIn("(kept)", text)
+        self.assertRegex(text, r"→.*1997.*\(kept\)")
+
+    def test_keep_current_table_shows_kept_value_clearly(self):
+        mb, itunes, deezer, lastfm = _providers_do_for_love()
+        proposed = _propose_metadata(
+            dict(_DFL), mb, itunes, deezer, lastfm, "Do For Love", "2Pac"
+        )
+        proposed["year"] = _DFL["year"]
+        out = io.StringIO()
+        Console(file=out, width=200).print(
+            _retag_table(_DFL, proposed, mb, itunes, deezer, lastfm),
+            no_wrap=True,
+        )
+        text = out.getvalue()
+        self.assertRegex(text, r"→.*1997.*\(kept\)")
+        self.assertIn("2011", text)
+        self.assertNotIn("discogs", text.lower())
+
+    def test_keep_current_when_current_value_is_a_candidate(self):
+        mb, itunes, deezer, lastfm = _providers_you_was_right()
+        itunes = dict(itunes, year="2016", confidence=1.0)
+        tags = dict(_WY, year="2016")
+        proposed = {"year": "2016", "album": "proposed-album", "track_num": 0}
+        cands = _retag_field_candidates(
+            tags, proposed, "year", mb, itunes, deezer, lastfm
+        )
+        self.assertTrue(cands["kept"])
+        text = _retag_breakdown_text(cands)
+        arrowed = cands["groups"][cands["proposing"]]["display"]
+        self.assertEqual(arrowed, "2016")
+        self.assertRegex(text, r"→.*2016.*\(kept\)")
 
     def test_near_similar_genres_collapse(self):
         mb, itunes, deezer, lastfm = _providers_you_was_right()

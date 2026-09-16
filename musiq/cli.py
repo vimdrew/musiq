@@ -974,23 +974,36 @@ def _retag_field_candidates(
 
     group_list = [groups[k] for k in order]
 
+    current = _str_value(tags, field)
     pv = proposed.get(field)
     prop_key = None
     if pv is not None and str(pv).strip() not in ("", "0"):
         prop_key = _group_key(pv)
+    kept = bool(current and prop_key is not None and _group_key(current) == prop_key)
     proposing = None
     for i, g in enumerate(group_list):
         if prop_key is not None and _group_key(g["value"]) == prop_key:
             proposing = i
             break
+    if proposing is None and kept:
+        group_list.append(
+            {
+                "value": tags.get(field),
+                "display": current,
+                "providers": ["existing tag"],
+                "caveats": [],
+            }
+        )
+        proposing = len(group_list) - 1
     if proposing is not None and proposing > 0:
         group_list.insert(0, group_list.pop(proposing))
         proposing = 0
 
     return {
-        "current": _str_value(tags, field),
+        "current": current,
         "groups": group_list,
         "proposing": proposing,
+        "kept": kept,
         "disputed": _is_disputed(group_list),
     }
 
@@ -1000,15 +1013,20 @@ def _retag_breakdown_text(cands: dict) -> str:
 
     Numbers are reserved for the per-field picker, so the inline breakdown
     marks the proposed value with an arrow instead of renumbering everything.
+    When the proposal keeps the existing tag, the arrowed line is labelled
+    "(kept)" so it is unambiguous which value will be written on accept.
     """
     lines = []
     proposing = cands["proposing"]
+    kept = cands.get("kept")
     for i, g in enumerate(cands["groups"], 1):
         src = ", ".join(g["providers"])
         if g["caveats"]:
             src += " — " + ", ".join(g["caveats"])
-        mark = "[green]→[/green] " if proposing is not None and i == proposing + 1 else "  "
-        lines.append(mark + escape(g["display"] or "—") + "  " + escape(f"[{src}]"))
+        arrowed = proposing is not None and i == proposing + 1
+        mark = "[green]→[/green] " if arrowed else "  "
+        note = " [dim](kept)[/dim]" if arrowed and kept else ""
+        lines.append(mark + escape(g["display"] or "—") + note + "  " + escape(f"[{src}]"))
     return "\n".join(lines)
 
 
