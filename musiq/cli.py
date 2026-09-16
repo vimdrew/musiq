@@ -659,6 +659,50 @@ def edit(query: tuple[str, ...]):
     )
 
 
+@cli.command("view")
+@click.argument("query", nargs=-1, required=True)
+def view(query: tuple[str, ...]):
+    """View a track's current ID3 metadata in a read-only table."""
+    q = " ".join(query)
+    music_dir = _music_dir()
+    filepath = _select_track(music_dir, q)
+    if filepath is None:
+        return
+
+    tags = read_id3_tags(filepath)
+    if not tags:
+        console.print(f"[red]✖ No ID3 tags found in {filepath}[/red]")
+        raise SystemExit(1)
+
+    artist, album, song = _track_parts(music_dir, filepath)
+
+    def cell(value) -> str:
+        return escape(str(value)) if value not in ("", None, 0) else "[dim]—[/dim]"
+
+    console.print(f"[bold]Metadata for:[/bold] {filepath}")
+    table = Table(box=box.ROUNDED, title=f"Metadata — {tags.get('title') or song}")
+    table.add_column("Field", style="bold cyan", width=14)
+    table.add_column("Value")
+    table.add_row("File", f"[dim]{escape(str(filepath))}[/dim]")
+    table.add_row("Folder", f"[dim]{escape(artist)} / {escape(album)}[/dim]" if album else f"[dim]{escape(artist)}[/dim]")
+    table.add_row("Title", cell(tags.get("title")))
+    table.add_row("Artist", cell(tags.get("artist")))
+    table.add_row("Album artist", cell(tags.get("album_artist")))
+    table.add_row("Album", cell(tags.get("album")))
+    table.add_row("Track", cell(tags.get("track_num")))
+    table.add_row("Disc", cell(tags.get("disc_num")))
+    table.add_row("Year", cell(tags.get("year")))
+    table.add_row("Genre", cell(tags.get("genre")))
+    table.add_row("Composer", cell(tags.get("composer")))
+    table.add_row(
+        "Artwork",
+        f"[dim]{n} image{'s' if n != 1 else ''}[/dim]"
+        if (n := len(tags.get("images") or []))
+        else "[dim]—[/dim]",
+    )
+    console.print(table)
+
+
 @cli.command("retag")
 @click.argument("query", nargs=-1, required=True)
 def retag(query: tuple[str, ...]):

@@ -89,6 +89,9 @@ musiq search "bohemian rhapsody"
 # Fetch metadata for a track and fix its ID3 tags
 musiq retag "bohemian rhapsody"
 
+# View a track's current ID3 metadata in a read-only table
+musiq view "bohemian rhapsody"
+
 # Import a single track from a YouTube URL (interactive metadata)
 musiq import "https://www.youtube.com/watch?v=apEMrIDUPz0"
 
