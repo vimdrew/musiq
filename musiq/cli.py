@@ -703,6 +703,198 @@ def view(query: tuple[str, ...]):
     console.print(table)
 
 
+def _probe_singles(singles: list) -> list[tuple[str, str, str, str]]:
+    """Probe unfixed singles on MusicBrainz for a real parent album.
+
+    For each single (album tag == track title), looks the recording up with
+    ``recording_metadata``.  When the best release is a real Album whose
+    name differs from the track title, the single belongs to that album
+    and is a retag candidate.  Returns ``(artist, track_title, album, year)``.
+
+    MusicBrainz rate-limits to ~1 request/s, so this iterates serially.
+    """
+    from musiq.musicbrainz import recording_metadata
+
+    found: list[tuple[str, str, str, str]] = []
+    for issue in singles:
+        title = issue.tag_album.strip()
+        console.print(f"[dim]Checking {issue.artist_folder} / {title}...[/dim]")
+        try:
+            meta = recording_metadata(issue.artist_folder, title)
+        except Exception:
+            continue
+        if not meta.get("match"):
+            continue
+        album = (meta.get("album") or "").strip()
+        if album and album.lower() != title.lower():
+            found.append((issue.artist_folder, title, album, meta.get("year") or ""))
+    return found
+
+
+@cli.command("organize")
+@click.option("--apply", "do_apply", is_flag=True,
+              help="Actually move folders (default: dry-run only)")
+@click.option("--check-singles", "check_singles", is_flag=True,
+              help="Probe untagged singles against MusicBrainz for a real parent album")
+@click.option("--no-navidrome", "no_navidrome", is_flag=True,
+              help="Skip Navidrome rescan after --apply")
+def organize(do_apply: bool, no_navidrome: bool, check_singles: bool):
+    """Scan the library for album-folder / tag mismatches and fix them.
+
+    Shows a table of every album folder whose on-disk name doesn't match
+    its ID3 album tag.  Folders that are already correct modulo character
+    substitution (``:`` -> ``_``, etc.) are filtered out.
+
+    Singles whose album tag still equals the track title are left alone
+    (a genuine single legitimately has ``album = title``).  Pass
+    ``--check-singles`` to look each of those up on MusicBrainz and show
+    which ones actually belong to a real album (a different name from the
+    track title) — those are candidates for ``musiq retag``.
+
+    With ``--apply``, the command asks for confirmation per folder before
+    moving (or merging into an existing target folder).  When a file would
+    overwrite one that already exists in the target folder, only that file
+    is skipped and reported — the rest of the folder still moves.  Finally
+    a Navidrome library scan is triggered (unless ``--no-navidrome``).
+    """
+    from musiq.folders import scan_library, rename_folder
+    from musiq import navidrome
+
+    music_dir = _music_dir()
+    console.print("[bold]Scanning library for album-folder mismatches...[/bold]")
+    issues = scan_library(music_dir)
+
+    renames = [i for i in issues if i.category == "rename"]
+    merges = [i for i in issues if i.category == "merge"]
+    unfixed_singles = [i for i in issues if i.category == "unfixed_single"]
+    collisions = [i for i in issues if i.category == "collision"]
+    mixed = [i for i in issues if i.category == "mixed"]
+    has_mismatches = renames or merges or collisions or mixed
+
+    # ── main mismatches table ────────────────────────────────────────
+    table = Table(box=box.ROUNDED, title="Album-folder mismatches")
+    table.add_column("Artist / Folder", style="magenta")
+    table.add_column("Album (tag)", style="white")
+    table.add_column("→ Target", style="green")
+    table.add_column("Files", justify="right", style="dim")
+
+    for i in renames:
+        table.add_row(
+            f"{i.artist_folder} / {escape(i.album_folder)}",
+            escape(i.tag_album),
+            f"[green]{escape(i.target_folder)}[/green]",
+            str(len(i.files)),
+        )
+    for i in merges:
+        table.add_row(
+            f"{i.artist_folder} / {escape(i.album_folder)}",
+            escape(i.tag_album),
+            f"[green]{escape(i.target_folder)}[/green] (merge)",
+            str(len(i.files)),
+        )
+    for i in collisions:
+        table.add_row(
+            f"{i.artist_folder} / {escape(i.album_folder)}",
+            escape(i.tag_album),
+            f"[yellow]{escape(i.target_folder)}[/yellow] (file exists)",
+            str(len(i.files)),
+        )
+    for i in mixed:
+        table.add_row(
+            f"{i.artist_folder} / {escape(i.album_folder)}",
+            f"[dim](mixed)[/dim] {escape(i.tag_album)}",
+            "[dim]—[/dim]",
+            str(len(i.files)),
+        )
+
+    if has_mismatches:
+        console.print(table)
+
+    # ── optional: probe "untagged" singles for a real parent album ────
+    if check_singles and unfixed_singles:
+        candidates = _probe_singles(unfixed_singles)
+        if candidates:
+            cand_table = Table(box=box.ROUNDED,
+                               title="These singles belong to a real album — retag them")
+            cand_table.add_column("Artist / Single", style="magenta")
+            cand_table.add_column("Real album (MusicBrainz)", style="green")
+            cand_table.add_column("Year", style="white")
+            for artist, title, album, year in candidates:
+                cand_table.add_row(f"{escape(artist)} / {escape(title)} - Single",
+                                   escape(album), year or "—")
+            console.print(cand_table)
+        else:
+            console.print("[green]✓ No single maps to a real parent album[/green]")
+
+    if not has_mismatches:
+        console.print("[green]✓ No album-folder mismatches found[/green]")
+        return
+
+    # ── summary line ─────────────────────────────────────────────────
+    parts = []
+    if renames:
+        parts.append(f"[green]{len(renames)}[/green] renamed")
+    if merges:
+        parts.append(f"[green]{len(merges)}[/green] merged")
+    if collisions:
+        parts.append(f"[yellow]{len(collisions)}[/yellow] collision(s)")
+    if mixed:
+        parts.append(f"[dim]{len(mixed)}[/dim] mixed tags")
+    console.print("[bold]Summary:[/bold] " + " | ".join(parts))
+
+    applicable = renames + merges + collisions
+    if not do_apply:
+        if not applicable:
+            console.print("[yellow]Nothing to move — mixed tags need manual review[/yellow]")
+            return
+        console.print("[dim]Dry run — no changes made. Re-run with --apply to move.[/dim]")
+        return
+
+    if not applicable:
+        console.print("[yellow]Nothing to move — mixed tags need manual review[/yellow]")
+        return
+
+    # ── apply: confirm each move, one at a time ──────────────────────
+    renamed = 0
+    merged = 0
+    failed = 0
+    collided = 0
+    for issue in applicable:
+        src = f"{issue.artist_folder} / {issue.album_folder}"
+        tgt = f"{issue.artist_folder} / {issue.target_folder}"
+        if not click.confirm(f'Move "{src}" → "{tgt}"?', default=True):
+            console.print(f"[dim]Skipped:[/dim] {src}")
+            continue
+        result = rename_folder(issue, dry_run=False)
+        if result == "renamed":
+            renamed += 1
+        elif result == "merged":
+            merged += 1
+        elif result == "failed":
+            failed += 1
+        elif result == "collision":
+            collided += 1
+
+    summary = f"[bold]Done:[/bold] {renamed} renamed, {merged} merged"
+    if collided:
+        summary += f", {collided} collided during apply"
+    if failed:
+        summary += f", {failed} failed"
+    console.print(summary)
+
+    if no_navidrome or (renamed == 0 and merged == 0):
+        return
+
+    creds = navidrome.ensure_navidrome_config()
+    if creds:
+        console.print("[bold]Triggering Navidrome library scan...[/bold]")
+        if navidrome.start_scan(*creds):
+            navidrome.wait_for_scan(*creds)
+
+
+cli.add_command(organize, name="organise")
+
+
 @cli.command("retag")
 @click.argument("query", nargs=-1, required=True)
 def retag(query: tuple[str, ...]):

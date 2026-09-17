@@ -92,6 +92,16 @@ musiq retag "bohemian rhapsody"
 # View a track's current ID3 metadata in a read-only table
 musiq view "bohemian rhapsody"
 
+# Scan the library for album-folder / tag mismatches (dry-run table);
+# `organise` works as an alias. Singles whose album tag matches their
+# track title are left alone — pass --check-singles to probe them
+musiq organize
+
+# Move mismatched album folders to match their tags (one confirmation per
+# folder); files that would overwrite an existing same-named file are
+# skipped and reported, the rest of the folder still moves
+musiq organize --apply
+
 # Import a single track from a YouTube URL (interactive metadata)
 musiq import "https://www.youtube.com/watch?v=apEMrIDUPz0"
 
@@ -164,6 +174,7 @@ musiq/
 │   ├── musicbrainz.py  # MusicBrainz client (confirm_metadata + retag recording lookup)
 │   ├── ytmusic.py      # ytmusicapi wrapper for YT Music search
 │   ├── downloader.py   # yt-dlp wrapper + pipeline orchestrator
+│   ├── folders.py      # album-folder / tag mismatch scan + rename/merge (organize)
 │   ├── tagger.py       # eyeD3 ID3 + cover art writer
 │   ├── history.py      # SQLite history + perf_log
 │   ├── perf.py         # Timer + PerfRecord dataclass

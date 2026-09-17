@@ -17,6 +17,7 @@ dependencies = [
     "rich>=13",
     "click>=8",
     "pillow>=10",
+    "mutagen>=1.47",
 ]
 
 [project.scripts]
