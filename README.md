@@ -102,6 +102,10 @@ musiq organize
 # skipped and reported, the rest of the folder still moves
 musiq organize --apply
 
+# Same, but show the moves up front and ask ONE confirmation for the
+# whole batch (-y / --yes); decline and nothing is applied
+musiq organize --apply -y
+
 # Import a single track from a YouTube URL (interactive metadata)
 musiq import "https://www.youtube.com/watch?v=apEMrIDUPz0"
 

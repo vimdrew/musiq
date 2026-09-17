@@ -706,9 +706,11 @@ def view(query: tuple[str, ...]):
 @cli.command("organize")
 @click.option("--apply", "do_apply", is_flag=True,
               help="Actually move folders (default: dry-run only)")
+@click.option("-y", "--yes", "yes_mode", is_flag=True,
+              help="Ask one confirmation for the whole batch instead of one per folder")
 @click.option("--no-navidrome", "no_navidrome", is_flag=True,
               help="Skip Navidrome rescan after --apply")
-def organize(do_apply: bool, no_navidrome: bool):
+def organize(do_apply: bool, no_navidrome: bool, yes_mode: bool = False):
     """Scan the library for album-folder / tag mismatches and fix them.
 
     The rule is literal: for every album folder the folder name must equal
@@ -721,10 +723,13 @@ def organize(do_apply: bool, no_navidrome: bool):
     review).
 
     With ``--apply``, the command asks for confirmation per folder before
-    moving (or merging into an existing target folder).  When a file would
-    overwrite one that already exists in the target folder, only that file
-    is skipped and reported — the rest of the folder still moves.  Finally
-    a Navidrome library scan is triggered (unless ``--no-navidrome``).
+    moving (or merging into an existing target folder).  Pass ``-y`` to
+    skip the per-folder prompts: the full list of proposed moves is shown
+    up front (as in the dry run) and a single "Apply all?" confirmation
+    covers the whole batch.  When a file would overwrite one that already
+    exists in the target folder, only that file is skipped and reported —
+    the rest of the folder still moves.  Finally a Navidrome library scan
+    is triggered (unless ``--no-navidrome``).
     """
     from musiq.folders import scan_library, rename_folder
     from musiq import navidrome
@@ -806,17 +811,34 @@ def organize(do_apply: bool, no_navidrome: bool):
         console.print("[yellow]Nothing to move — mixed tags need manual review[/yellow]")
         return
 
-    # ── apply: confirm each move, one at a time ──────────────────────
+    # ── apply: decide which moves to run ───────────────────────────────
+    skipped = 0
+    if yes_mode:
+        if not click.confirm(
+            f"Apply all {len(applicable)} move(s)? "
+            f"({len(renames)} rename, {len(merges)} merge, {len(collisions)} collision)",
+            default=False,
+        ):
+            console.print("[yellow]Cancelled — nothing applied[/yellow]")
+            return
+        selected = list(applicable)
+    else:
+        selected = []
+        for issue in applicable:
+            src = f"{issue.artist_folder} / {issue.album_folder}"
+            tgt = f"{issue.artist_folder} / {issue.target_folder}"
+            if not click.confirm(f'Move "{src}" → "{tgt}"?', default=True):
+                console.print(f"[dim]Skipped:[/dim] {src}")
+                skipped += 1
+                continue
+            selected.append(issue)
+
+    # ── apply ────────────────────────────────────────────────────────
     renamed = 0
     merged = 0
     failed = 0
     collided = 0
-    for issue in applicable:
-        src = f"{issue.artist_folder} / {issue.album_folder}"
-        tgt = f"{issue.artist_folder} / {issue.target_folder}"
-        if not click.confirm(f'Move "{src}" → "{tgt}"?', default=True):
-            console.print(f"[dim]Skipped:[/dim] {src}")
-            continue
+    for issue in selected:
         result = rename_folder(issue, dry_run=False)
         if result == "renamed":
             renamed += 1
@@ -828,6 +850,8 @@ def organize(do_apply: bool, no_navidrome: bool):
             collided += 1
 
     summary = f"[bold]Done:[/bold] {renamed} renamed, {merged} merged"
+    if skipped:
+        summary += f", {skipped} skipped"
     if collided:
         summary += f", {collided} collided during apply"
     if failed:

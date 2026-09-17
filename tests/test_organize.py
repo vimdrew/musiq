@@ -425,6 +425,39 @@ class OrganizeCommandTest(unittest.TestCase):
         self.assertEqual(mock_confirm.call_count, 2)
         self.assertEqual(mock_rename.call_count, 1)
         self.assertIn("Skipped: A / One", self.out.getvalue())
+        self.assertIn(", 1 skipped", self.out.getvalue())
+
+    def test_apply_yes_single_confirm_applies_all(self):
+        issues = [
+            FolderIssue("A", "One", "T1", "T1", [], "rename"),
+            FolderIssue("A", "Two", "T2", "T2", [], "rename"),
+            FolderIssue("A", "Three", "T3", "T3", [], "rename"),
+        ]
+        with mock.patch.object(musiq.folders, "scan_library", return_value=issues), \
+             mock.patch.object(musiq.folders, "rename_folder",
+                               return_value="renamed") as mock_rename, \
+             mock.patch("musiq.cli.click.confirm",
+                        return_value=True) as mock_confirm:
+            cli.organize.callback(do_apply=True, no_navidrome=True, yes_mode=True)
+
+        self.assertEqual(mock_confirm.call_count, 1)
+        self.assertIn("Apply all 3 move(s)", mock_confirm.call_args.args[0])
+        text = self.out.getvalue()
+        self.assertIn("3 renamed, 0 merged", text)
+        self.assertEqual(mock_rename.call_count, 3)
+
+    def test_apply_yes_declined_applies_none(self):
+        issues = [
+            FolderIssue("A", "One", "T1", "T1", [], "rename"),
+        ]
+        with mock.patch.object(musiq.folders, "scan_library", return_value=issues), \
+             mock.patch.object(musiq.folders, "rename_folder",
+                               return_value="renamed") as mock_rename, \
+             mock.patch("musiq.cli.click.confirm", return_value=False):
+            cli.organize.callback(do_apply=True, no_navidrome=True, yes_mode=True)
+
+        self.assertEqual(mock_rename.call_count, 0)
+        self.assertIn("Cancelled — nothing applied", self.out.getvalue())
 
     def test_apply_reports_collision_result(self):
         issues = [
