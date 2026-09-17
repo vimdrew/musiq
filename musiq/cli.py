@@ -703,53 +703,22 @@ def view(query: tuple[str, ...]):
     console.print(table)
 
 
-def _probe_singles(singles: list) -> list[tuple[str, str, str, str]]:
-    """Probe unfixed singles on MusicBrainz for a real parent album.
-
-    For each single (album tag == track title), looks the recording up with
-    ``recording_metadata``.  When the best release is a real Album whose
-    name differs from the track title, the single belongs to that album
-    and is a retag candidate.  Returns ``(artist, track_title, album, year)``.
-
-    MusicBrainz rate-limits to ~1 request/s, so this iterates serially.
-    """
-    from musiq.musicbrainz import recording_metadata
-
-    found: list[tuple[str, str, str, str]] = []
-    for issue in singles:
-        title = issue.tag_album.strip()
-        console.print(f"[dim]Checking {issue.artist_folder} / {title}...[/dim]")
-        try:
-            meta = recording_metadata(issue.artist_folder, title)
-        except Exception:
-            continue
-        if not meta.get("match"):
-            continue
-        album = (meta.get("album") or "").strip()
-        if album and album.lower() != title.lower():
-            found.append((issue.artist_folder, title, album, meta.get("year") or ""))
-    return found
-
-
 @cli.command("organize")
 @click.option("--apply", "do_apply", is_flag=True,
               help="Actually move folders (default: dry-run only)")
-@click.option("--check-singles", "check_singles", is_flag=True,
-              help="Probe untagged singles against MusicBrainz for a real parent album")
 @click.option("--no-navidrome", "no_navidrome", is_flag=True,
               help="Skip Navidrome rescan after --apply")
-def organize(do_apply: bool, no_navidrome: bool, check_singles: bool):
+def organize(do_apply: bool, no_navidrome: bool):
     """Scan the library for album-folder / tag mismatches and fix them.
 
-    Shows a table of every album folder whose on-disk name doesn't match
-    its ID3 album tag.  Folders that are already correct modulo character
-    substitution (``:`` -> ``_``, etc.) are filtered out.
-
-    Singles whose album tag still equals the track title are left alone
-    (a genuine single legitimately has ``album = title``).  Pass
-    ``--check-singles`` to look each of those up on MusicBrainz and show
-    which ones actually belong to a real album (a different name from the
-    track title) — those are candidates for ``musiq retag``.
+    The rule is literal: for every album folder the folder name must equal
+    the current album tag on the files inside it.  Any folder whose name
+    doesn't match its album tag is a mismatch and is renamed to match the
+    tag — there is no exception for singles (a ``- Single`` suffix
+    mismatch is fixed too).  Folders already correct modulo character
+    substitution (``:`` -> ``_``, etc.) stay filtered out, as do folders
+    whose files disagree on the album tag (``mixed``, left for manual
+    review).
 
     With ``--apply``, the command asks for confirmation per folder before
     moving (or merging into an existing target folder).  When a file would
@@ -766,7 +735,6 @@ def organize(do_apply: bool, no_navidrome: bool, check_singles: bool):
 
     renames = [i for i in issues if i.category == "rename"]
     merges = [i for i in issues if i.category == "merge"]
-    unfixed_singles = [i for i in issues if i.category == "unfixed_single"]
     collisions = [i for i in issues if i.category == "collision"]
     mixed = [i for i in issues if i.category == "mixed"]
     has_mismatches = renames or merges or collisions or mixed
@@ -809,22 +777,6 @@ def organize(do_apply: bool, no_navidrome: bool, check_singles: bool):
 
     if has_mismatches:
         console.print(table)
-
-    # ── optional: probe "untagged" singles for a real parent album ────
-    if check_singles and unfixed_singles:
-        candidates = _probe_singles(unfixed_singles)
-        if candidates:
-            cand_table = Table(box=box.ROUNDED,
-                               title="These singles belong to a real album — retag them")
-            cand_table.add_column("Artist / Single", style="magenta")
-            cand_table.add_column("Real album (MusicBrainz)", style="green")
-            cand_table.add_column("Year", style="white")
-            for artist, title, album, year in candidates:
-                cand_table.add_row(f"{escape(artist)} / {escape(title)} - Single",
-                                   escape(album), year or "—")
-            console.print(cand_table)
-        else:
-            console.print("[green]✓ No single maps to a real parent album[/green]")
 
     if not has_mismatches:
         console.print("[green]✓ No album-folder mismatches found[/green]")

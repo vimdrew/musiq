@@ -96,21 +96,32 @@ class ScanLibraryTest(unittest.TestCase):
         self.assertEqual(issues[0].category, "rename")
         self.assertEqual(issues[0].tag_album, "Dedication")
 
-    def test_scan_classifies_unfixed_single(self):
-        """Folder 'X - Single', tag still == title → unfixed_single (leave alone)."""
+    def test_scan_flags_single_with_tag_equal_to_title(self):
+        """Folder 'X - Single', tag == title → still a mismatch, renamed."""
         self._make_album("Gunna", "kills - Single",
                          album_tag="kills", title="kills")
         issues = scan_library(self.music)
         self.assertEqual(len(issues), 1)
-        self.assertEqual(issues[0].category, "unfixed_single")
+        self.assertEqual(issues[0].category, "rename")
+        self.assertEqual(issues[0].target_folder, "kills")
 
-    def test_scan_classifies_unfixed_single_case_insensitive(self):
-        """Folder 'X - single' (lowercase), tag still == title → unfixed_single."""
+    def test_scan_flags_single_case_insensitive(self):
+        """Folder 'X - single' (lowercase) never matches the tag → mismatch."""
         self._make_album("Gunna", "kills - single",
                          album_tag="kills", title="kills")
         issues = scan_library(self.music)
         self.assertEqual(len(issues), 1)
-        self.assertEqual(issues[0].category, "unfixed_single")
+        self.assertEqual(issues[0].category, "rename")
+        self.assertEqual(issues[0].target_folder, "kills")
+
+    def test_scan_flags_single_when_tag_matches_sanitized_name(self):
+        """'All Summer Long - Single' with tag 'All Summer Long' → rename."""
+        self._make_album("Ally Nicholas", "All Summer Long - Single",
+                         album_tag="All Summer Long", title="All Summer Long")
+        issues = scan_library(self.music)
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].category, "rename")
+        self.assertEqual(issues[0].target_folder, "All Summer Long")
 
     def test_scan_classifies_merge_when_folder_exists_without_file(self):
         """Target folder exists but same-named file absent → merge."""
@@ -334,7 +345,7 @@ class RenameFolderTest(unittest.TestCase):
         issue = FolderIssue(
             artist_folder="Test", album_folder="Folder",
             tag_album="Tag", target_folder="Tag",
-            files=[], category="unfixed_single",
+            files=[], category="mixed",
         )
         self.assertEqual(rename_folder(issue, dry_run=False), "skipped")
 
@@ -355,40 +366,29 @@ class OrganizeCommandTest(unittest.TestCase):
         with mock.patch.object(musiq.folders, "scan_library", return_value=issues), \
              mock.patch.object(musiq.folders, "rename_folder", return_value="skipped"), \
              mock.patch("musiq.cli.click.confirm", return_value=False):
-            cli.organize.callback(do_apply=False, no_navidrome=True, check_singles=False)
+            cli.organize.callback(do_apply=False, no_navidrome=True)
 
         text = self.out.getvalue()
         self.assertIn("Album-folder mismatches", text)
         self.assertIn("Wrong", text)
         self.assertIn("Right", text)
 
-    def test_unfixed_singles_not_shown_by_default(self):
-        """Unfixed singles (tag == title) are not reported in default output."""
+    def test_single_suffix_mismatch_flagged_in_table(self):
+        """A '- Single' folder whose name differs from the tag appears in the table."""
         issues = [
             FolderIssue("Gunna", "kills - Single", "kills",
-                        "kills", [Path("/x")], "unfixed_single"),
+                        "kills", [Path("/x")], "rename"),
         ]
         with mock.patch.object(musiq.folders, "scan_library", return_value=issues):
-            cli.organize.callback(do_apply=False, no_navidrome=True, check_singles=False)
+            cli.organize.callback(do_apply=False, no_navidrome=True)
 
         text = self.out.getvalue()
-        self.assertNotIn("tag = track title", text)
-        self.assertNotIn("Not renamed", text)
-        self.assertIn("No album-folder mismatches found", text)
-
-    def test_skips_apply_when_nothing_eligible(self):
-        issues = [
-            FolderIssue("A", "F", "T", "T", [], "unfixed_single"),
-        ]
-        with mock.patch.object(musiq.folders, "scan_library", return_value=issues):
-            cli.organize.callback(do_apply=False, no_navidrome=True, check_singles=False)
-
-        text = self.out.getvalue()
-        self.assertIn("No album-folder mismatches found", text)
+        self.assertIn("Album-folder mismatches", text)
+        self.assertIn("kills - Single", text)
 
     def test_empty_scan_prints_no_mismatches(self):
         with mock.patch.object(musiq.folders, "scan_library", return_value=[]):
-            cli.organize.callback(do_apply=False, no_navidrome=True, check_singles=False)
+            cli.organize.callback(do_apply=False, no_navidrome=True)
 
         text = self.out.getvalue()
         self.assertIn("No album-folder mismatches found", text)
@@ -403,7 +403,7 @@ class OrganizeCommandTest(unittest.TestCase):
              mock.patch.object(musiq.folders, "rename_folder",
                                return_value="renamed") as mock_rename, \
              mock.patch("musiq.cli.click.confirm", return_value=True):
-            cli.organize.callback(do_apply=True, no_navidrome=True, check_singles=False)
+            cli.organize.callback(do_apply=True, no_navidrome=True)
 
         self.assertEqual(mock_rename.call_count, 3)
         text = self.out.getvalue()
@@ -420,7 +420,7 @@ class OrganizeCommandTest(unittest.TestCase):
                                return_value="renamed") as mock_rename, \
              mock.patch("musiq.cli.click.confirm",
                         side_effect=[False, True]) as mock_confirm:
-            cli.organize.callback(do_apply=True, no_navidrome=True, check_singles=False)
+            cli.organize.callback(do_apply=True, no_navidrome=True)
 
         self.assertEqual(mock_confirm.call_count, 2)
         self.assertEqual(mock_rename.call_count, 1)
@@ -434,7 +434,7 @@ class OrganizeCommandTest(unittest.TestCase):
              mock.patch.object(musiq.folders, "rename_folder",
                                return_value="collision") as mock_rename, \
              mock.patch("musiq.cli.click.confirm", return_value=True):
-            cli.organize.callback(do_apply=True, no_navidrome=True, check_singles=False)
+            cli.organize.callback(do_apply=True, no_navidrome=True)
 
         self.assertEqual(mock_rename.call_count, 1)
         self.assertIn("collided during apply", self.out.getvalue())
@@ -449,7 +449,7 @@ class OrganizeCommandTest(unittest.TestCase):
         with mock.patch.object(musiq.folders, "scan_library", return_value=issues), \
              mock.patch.object(musiq.folders, "rename_folder",
                                return_value="renamed") as mock_rename:
-            cli.organize.callback(do_apply=True, no_navidrome=True, check_singles=False)
+            cli.organize.callback(do_apply=True, no_navidrome=True)
 
         self.assertEqual(mock_rename.call_count, 0)
         text = self.out.getvalue()
@@ -463,7 +463,7 @@ class OrganizeCommandTest(unittest.TestCase):
              mock.patch.object(musiq.folders, "rename_folder",
                                return_value="merged") as mock_rename, \
              mock.patch("musiq.cli.click.confirm", return_value=True):
-            cli.organize.callback(do_apply=True, no_navidrome=True, check_singles=False)
+            cli.organize.callback(do_apply=True, no_navidrome=True)
 
         self.assertEqual(mock_rename.call_count, 1)
         text = self.out.getvalue()

@@ -20,7 +20,7 @@ class FolderIssue:
     tag_album: str
     target_folder: str
     files: list[Path] = field(repr=False, default_factory=list)
-    category: str = ""  # "rename" | "merge" | "unfixed_single" | "collision" | "mixed"
+    category: str = ""  # "rename" | "merge" | "collision" | "mixed"
 
 
 def _read_id3_tags(filepath: Path) -> tuple[str, str]:
@@ -37,16 +37,17 @@ def _read_id3_tags(filepath: Path) -> tuple[str, str]:
 def scan_library(music_dir: Path) -> list[FolderIssue]:
     """Walk the library and return album folders whose name doesn't match the album tag.
 
+    The rule is literal: for every album folder the folder name must equal
+    the current album tag on the files inside it.  If it doesn't, that's a
+    mismatch — the folder is renamed to match the tag.  No special case is
+    made for singles (``- Single`` folders, tag == track title, etc.); a
+    ``- Single`` suffix mismatch is just an ordinary mismatch.
+
     Handles the standard ``~/Music/<Artist>/<Album>/<files>`` layout only.
     Files at artist root or nested deeper than two levels are skipped.
     Files whose album tag differs from siblings in the same folder are
-    flagged as ``mixed`` and excluded from automatic fixing.
-
-    When a folder ends with ``- Single`` and the album tag matches the
-    track title (i.e. the single was never retagged to a real parent
-    album), it is classified as ``unfixed_single`` — these are left
-    alone since the metadata is genuine (the folder name is just how
-    the downloader stores singles).
+    flagged as ``mixed`` and excluded from automatic fixing — there is no
+    single correct target to rename to in that case.
 
     When the target album folder already exists but a same-named file is
     NOT already inside it, the issue is classified as ``merge`` — the
@@ -107,7 +108,6 @@ def scan_library(music_dir: Path) -> list[FolderIssue]:
             tag_album = tags[0]
             entries = tag_entries[tag_album]
             files = [f for f, _ in entries]
-            titles = [t for _, t in entries]
             target = sanitize(tag_album)
 
             # Already correct — the folder name matches what sanitize() would produce.
@@ -124,29 +124,6 @@ def scan_library(music_dir: Path) -> list[FolderIssue]:
                 else:
                     # Folder exists but the file doesn't — safe to move into it.
                     category = "merge"
-            elif (
-                album_folder.rstrip().lower().endswith("- single")
-                and not tag_album.rstrip().lower().endswith("- single")
-            ):
-                # Folder says "- Single" but tag was changed.  Determine whether
-                # the tag still matches the track title (never retagged to a
-                # real album) or was updated to a distinct album name.
-                tag_is_title = all(
-                    t.lower() == tag_album.lower()
-                    for t in titles
-                    if t
-                )
-                if tag_is_title:
-                    # The album tag is just the track title — this is a genuine
-                    # single whose tag was never corrected to a parent album.
-                    # Leave it alone: the folder name matches what the downloader
-                    # produced and the metadata is faithful.
-                    category = "unfixed_single"
-                else:
-                    # Tag was retagged to a different album name (e.g. an EP or
-                    # album the single belongs to) — this is real folder-vs-tag
-                    # drift, same as any other rename.
-                    category = "rename"
             else:
                 category = "rename"
 

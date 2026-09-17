@@ -93,8 +93,8 @@ musiq retag "bohemian rhapsody"
 musiq view "bohemian rhapsody"
 
 # Scan the library for album-folder / tag mismatches (dry-run table);
-# `organise` works as an alias. Singles whose album tag matches their
-# track title are left alone — pass --check-singles to probe them
+# `organise` works as an alias. The rule is literal: folder name must
+# equal the album tag — a "- Single" suffix mismatch counts too
 musiq organize
 
 # Move mismatched album folders to match their tags (one confirmation per
