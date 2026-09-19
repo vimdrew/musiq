@@ -35,10 +35,13 @@ cross-check via autocorrect + genre tags). It can also be set as the
 `LASTFM_API_KEY` env var, which takes priority. Without it, `musiq retag`
 just skips Last.fm and uses iTunes.
 
-Deezer (also used by `musiq retag`) needs no key — its public API serves
-album/genre/year for the best artist+title hit. It sits alongside iTunes as
-a fallback metadata source, and its match is confidence-gated: a confident
-Deezer hit displaces a weak iTunes album pick.
+Deezer (used by `musiq download` and `musiq retag`) needs no key — its public
+API serves album/genre/year for the best artist+title hit. It sits alongside
+iTunes: a confident Deezer hit (confidence ≥ 0.9, the same weak-match
+threshold `musiq retag` uses) supplies album/genre/year and cover art, and
+anything below that falls through to the existing iTunes resolution. Album
+batches dedupe the per-album lookup and space requests to stay under Deezer's
+rate limit.
 
 MusicBrainz (also used by `musiq retag`) needs no key — a polite
 User-Agent is enough. It resolves recordings by artist MBID + title instead
@@ -73,6 +76,9 @@ musiq download "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
 
 # Skip iTunes metadata lookup
 musiq download <url> --no-itunes
+
+# Skip Deezer metadata lookup
+musiq download <url> --no-deezer
 
 # Dry-run (show what would download)
 musiq download <url> --dry-run
@@ -173,7 +179,7 @@ musiq/
 │   ├── cli.py          # click commands
 │   ├── spotify.py      # __NEXT_DATA__ scraper + Spotify search
 │   ├── itunes.py       # iTunes Search API client
-│   ├── deezer.py       # Deezer public API client (retag: album/genre/year)
+│   ├── deezer.py       # Deezer public API client (download + retag: album/genre/year)
 │   ├── lastfm.py       # Last.fm API client (retag metadata source)
 │   ├── musicbrainz.py  # MusicBrainz client (confirm_metadata + retag recording lookup)
 │   ├── ytmusic.py      # ytmusicapi wrapper for YT Music search

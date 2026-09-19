@@ -1,0 +1,138 @@
+# Qobuz API — Quick Reference
+
+Qobuz exposes an **undocumented** private REST API at:
+
+```
+https://www.qobuz.com/api.json/0.2/
+```
+
+Unlike Deezer, there is **no anonymous access** — every endpoint requires an
+`app_id` plus a `user_auth_token` from a real Qobuz account.
+
+---
+
+## Authentication
+
+Three pieces are required:
+
+1. **`app_id`** — application ID. Present in the web player JavaScript bundle.
+2. **`app_secret`** — application secret, needed to sign protected endpoints
+   (e.g. `track/getFileUrl`).
+3. **`user_auth_token`** — obtained by logging into `user/login` with a Qobuz
+   account (email + MD5'd password).
+
+### Scraping app_id / app_secret from the web player
+
+The login page references a bundle.js file. Fetch it and locate the
+production credentials block:
+
+```bash
+curl -s https://play.qobuz.com/login | grep -o 'src="[^"]*bundle.js"'
+curl -s <bundle_url_from_above> | grep -oE 'production:.*appSecret:"[^"]*"'
+```
+
+Extracted (2026-09, build 8.2.0-b034):
+
+| Env        | app_id     | app_secret                       |
+|------------|-----------|----------------------------------|
+| production | `798273057` | `05a4851e74ee47fda346f50cfdfc4f09` |
+| integration| `377257687` | `f686f063cb0841079d48495d4dea7cf2` |
+| nightly    | `377257687` | `05a4851e74ee47fda346f50cfdfc4f09` |
+
+Note: app_id = app_secret are a **matched pair**. Using a mismatched secret
+against `track/getFileUrl` returns `400 Invalid Request Signature`.
+
+### Logging in
+
+```
+POST /user/login
+Headers:  X-App-Id: <app_id>
+Params:   email=<email>&password=<md5(password)>&app_id=<app_id>
+```
+
+Response contains `user_auth_token`. Add it as a session header:
+
+```
+X-User-Auth-Token: <user_auth_token>
+```
+
+With both `X-App-Id` and `X-User-Auth-Token` headers set, search and metadata
+endpoints work. Without them → `401 User authentication is required`.
+
+---
+
+## Search endpoints
+
+All accept `query`, `limit`, `offset` (no signature needed, but require the
+auth token):
+
+| Endpoint          | Description                |
+|-------------------|----------------------------|
+| `catalog/search`  | Cross-catalog (all types)  |
+| `track/search`    | Tracks only                |
+| `album/search`    | Albums only                |
+| `artist/search`   | Artists only               |
+| `playlist/search` | Playlists only             |
+
+Example (track search):
+
+```bash
+curl -s "https://www.qobuz.com/api.json/0.2/track/search" \
+  -H "X-App-Id: 798273057" \
+  -H "X-User-Auth-Token: <token>" \
+  -G --data-urlencode "query=wyclef jean young thug" \
+  --data-urlencode "limit=5"
+```
+
+Track result shape (JSON): track has `id`, `title`, `version`, `duration`,
+`released_at`, `album{title,released_at,release_date_original,genre}`,
+`performer{name}`, `media_type`, etc.
+
+---
+
+## Metadata endpoints
+
+| Endpoint        | Params                          |
+|-----------------|---------------------------------|
+| `track/get`     | `track_id=<id>`                 |
+| `album/get`     | `album_id=<id>`                 |
+| `artist/get`    | `artist_id=<id>` (+ `extra=albums`) |
+| `playlist/get`  | `playlist_id=<id>` (+ `extra=tracks`) |
+
+These callers already carry the auth headers, so no signature is required.
+
+---
+
+## Signed endpoints
+
+Some endpoints need an **MD5 request signature**:
+
+`track/getFileUrl` (streaming URL):
+
+```
+sig = md5("trackgetFileUrlformat_id<fmt>intentstreamtrack_id<track_id>" + "<unix_ts>" + "<app_secret>")
+params: request_ts=<unix_ts>&request_sig=<sig>&track_id=<id>&format_id=<fmt>&intent=stream
+```
+
+Quality IDs: `5`=MP3 320, `6`=FLAC 16-bit, `7`=FLAC 24-bit ≤96kHz, `27`=FLAC
+24-bit >96kHz.
+
+`favorite/getUserFavorites`:
+
+```
+sig = md5("favoritegetUserFavorites" + "<unix_ts>" + "<app_secret>")
+```
+
+---
+
+## Current status (tested 2026-09-16)
+
+- `app_id` / `app_secret` were successfully scraped from the live bundle.js.
+- **Blocked:** search + metadata return `401 User authentication is required`
+  because a `user_auth_token` could not be obtained without Qobuz account
+  credentials (email/password).
+- Guest/device login attempts and legacy app IDs (`950244987`, `2146024384`,
+  `916443999`, `355768545`) are all rejected with `400`/`401`.
+
+**Conclusion:** to run the "wyclef jean / young thug" metadata lookup, a real
+Qobuz account password is required to mint a `user_auth_token`.

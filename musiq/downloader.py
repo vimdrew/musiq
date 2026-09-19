@@ -8,12 +8,13 @@ from pathlib import Path
 import yt_dlp
 
 from musiq.display import console
+from musiq.deezer import fetch_track_metadata as deezer_search
 from musiq.history import track_exists, add_download, insert_perf
 from musiq.itunes import fetch_metadata as itunes_search
 from musiq.perf import Timer, PerfRecord
 from musiq.spotify import resolve_entity
 from musiq.tagger import tag_file
-from musiq.youtube import search_best_audio
+from musiq.youtube import YDL_YOUTUBE_EXTRACTOR_ARGS, search_best_audio
 from musiq.ytmusic import search_song
 
 OUTPUT_BASE = Path.home() / "Music"
@@ -22,6 +23,7 @@ MUSIQ_DIR = Path.home() / ".musiq"
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*]')
 _PARALLEL_LOCK = threading.Lock()
 _CONFIDENCE_THRESHOLD = 0.6
+_DEEZER_CONFIDENCE = 0.9
 _MB_JOIN_TIMEOUT = 6.0
 
 
@@ -133,6 +135,56 @@ def _join_artists(meta: dict) -> str:
     return meta.get("artist", "Unknown Artist")
 
 
+def _resolve_metadata(meta: dict, itunes_meta: dict, deezer_meta: dict, title: str) -> tuple[str, str, str, str]:
+    """Resolve final album / cover / genre / year for tagging.
+
+    Deezer is preferred where it supplies a value at confidence >= 0.9
+    (matching the weak-match threshold used by retag); otherwise the
+    existing iTunes-based resolution is used byte-for-byte.
+    """
+    deezer_confident = (
+        deezer_meta.get("ok", False)
+        and deezer_meta.get("confidence", 0.0) >= _DEEZER_CONFIDENCE
+    )
+
+    album = meta.get("album") or ""
+    if deezer_confident and deezer_meta.get("album"):
+        album = deezer_meta["album"]
+    elif album.endswith("- Single") and itunes_meta.get("album"):
+        album = itunes_meta["album"]
+    elif not album:
+        album = itunes_meta.get("album") or f"{title} - Single"
+
+    cover_url = meta.get("cover_url")
+    if cover_url is None and deezer_confident and deezer_meta.get("artwork_url"):
+        cover_url = deezer_meta["artwork_url"]
+    if cover_url is None and itunes_meta.get("artwork_url"):
+        cover_url = itunes_meta["artwork_url"]
+    if cover_url is None:
+        cover_url = ""
+
+    spotify_year = meta.get("year")
+    confidence = itunes_meta.get("confidence", 0.0)
+
+    if deezer_confident and deezer_meta.get("genre"):
+        genre = deezer_meta["genre"]
+    elif confidence >= _CONFIDENCE_THRESHOLD:
+        genre = itunes_meta.get("genre", "")
+    else:
+        genre = meta.get("resolved_genre") or itunes_meta.get("genre", "")
+
+    if spotify_year:
+        year = spotify_year
+    elif deezer_confident and deezer_meta.get("year"):
+        year = deezer_meta["year"]
+    elif confidence >= _CONFIDENCE_THRESHOLD:
+        year = itunes_meta.get("year", "")
+    else:
+        year = meta.get("resolved_year") or itunes_meta.get("year", "")
+
+    return album, cover_url, genre, year
+
+
 def _build_ydl_opts(temp_dir: Path) -> dict:
     """Build the shared yt-dlp options for MP3 conversion (320 kbps).
 
@@ -152,6 +204,7 @@ def _build_ydl_opts(temp_dir: Path) -> dict:
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        "extractor_args": YDL_YOUTUBE_EXTRACTOR_ARGS,
     }
     cookies_file = _cookies_file()
     if cookies_file:
@@ -176,6 +229,7 @@ def resolve_video(url: str) -> dict | None:
         "skip_download": True,
         "noplaylist": True,
         "socket_timeout": 15,
+        "extractor_args": YDL_YOUTUBE_EXTRACTOR_ARGS,
     }
     cookies_file = _cookies_file()
     if cookies_file:
@@ -234,6 +288,7 @@ def process_track(
     meta: dict,
     *,
     no_itunes: bool = False,
+    no_deezer: bool = False,
     dry_run: bool = False,
     force: bool = False,
     perf_only: PerfRecord | None = None,
@@ -268,8 +323,10 @@ def process_track(
     mb_isrc = meta.get("isrc") or ""
     if mb_isrc and title != "Unknown":
         from musiq.musicbrainz import confirm_and_log
+        deezer_cache = meta.get("_deezer_cache") or {}
         mb_genre = (
             meta.get("resolved_genre")
+            or deezer_cache.get("genre")
             or (meta.get("_itunes_cache") or {}).get("genre")
             or ""
         )
@@ -280,7 +337,11 @@ def process_track(
                 title,
                 meta.get("album") or "",
                 mb_genre or None,
-                "itunes" if mb_genre else "none",
+                "deezer"
+                if deezer_cache.get("genre")
+                else "itunes"
+                if mb_genre
+                else "none",
                 duration_ms,
             ),
             daemon=True,
@@ -302,28 +363,36 @@ def process_track(
 
         itunes_meta = meta.get("_itunes_cache", {})
         itunes_cached = bool(itunes_meta)
+        deezer_meta = meta.get("_deezer_cache", {})
+        deezer_cached = bool(deezer_meta)
+        fetch_itunes = not itunes_cached and not no_itunes
+        fetch_deezer = not deezer_cached and not no_deezer
 
         temp_dir = Path(tempfile.mkdtemp(prefix="musiq_"))
         ydl_opts = _build_ydl_opts(temp_dir)
         dl_url = video_url or search_best_audio(title, artist, duration_sec) or f"ytsearch1:{title} {artist}"
 
-        if not itunes_cached and not no_itunes:
+        if fetch_itunes or fetch_deezer:
             from concurrent.futures import ThreadPoolExecutor
             with Timer() as itunes_timer:
-                with ThreadPoolExecutor(max_workers=1) as ex:
-                    itunes_future = ex.submit(itunes_search, artist, title)
+                with ThreadPoolExecutor(max_workers=int(fetch_itunes) + int(fetch_deezer)) as ex:
+                    itunes_future = ex.submit(itunes_search, artist, title) if fetch_itunes else None
+                    deezer_future = ex.submit(deezer_search, artist, title) if fetch_deezer else None
                     dl_result = _do_download(dl_url, ydl_opts, title, artist, duration_sec, perf)
                     if dl_result is None:
                         total_timer.stop()
                         perf.t_total_ms = total_timer.elapsed_ms
                         itunes_timer.stop()
-                        perf.t_itunes_ms = itunes_timer.elapsed_ms
+                        perf.t_itunes_ms = itunes_timer.elapsed_ms if fetch_itunes else 0
                         insert_perf(perf)
                         shutil.rmtree(temp_dir, ignore_errors=True)
                         return {"status": "failed", "title": title, "artist": artist, "duration": duration_sec}
                     downloaded, filesize_kb = dl_result
-                itunes_meta = itunes_future.result()
-            perf.t_itunes_ms = itunes_timer.elapsed_ms
+                if itunes_future is not None:
+                    itunes_meta = itunes_future.result()
+                if deezer_future is not None:
+                    deezer_meta = deezer_future.result()
+            perf.t_itunes_ms = itunes_timer.elapsed_ms if fetch_itunes else 0
         else:
             perf.t_itunes_ms = 0
             dl_result = _do_download(dl_url, ydl_opts, title, artist, duration_sec, perf)
@@ -338,25 +407,7 @@ def process_track(
         if mb_thread:
             mb_thread.join(timeout=_MB_JOIN_TIMEOUT)
 
-        album = meta.get("album") or ""
-        if album.endswith("- Single") and itunes_meta.get("album"):
-            album = itunes_meta["album"]
-        if not album:
-            album = itunes_meta.get("album") or f"{title} - Single"
-
-        if cover_url is None and itunes_meta.get("artwork_url"):
-            cover_url = itunes_meta["artwork_url"]
-        if cover_url is None:
-            cover_url = ""
-
-        spotify_year = meta.get("year")
-        confidence = itunes_meta.get("confidence", 0.0)
-        if confidence >= _CONFIDENCE_THRESHOLD:
-            genre = itunes_meta.get("genre", "")
-            year = spotify_year or itunes_meta.get("year", "")
-        else:
-            genre = meta.get("resolved_genre") or itunes_meta.get("genre", "")
-            year = spotify_year or meta.get("resolved_year") or itunes_meta.get("year", "")
+        album, cover_url, genre, year = _resolve_metadata(meta, itunes_meta, deezer_meta, title)
 
         album_dir = OUTPUT_BASE / sanitize(_folder_artist(meta, artist)) / sanitize(album)
         album_dir.mkdir(parents=True, exist_ok=True)
@@ -432,6 +483,7 @@ def handle_url(
     url: str,
     *,
     no_itunes: bool = False,
+    no_deezer: bool = False,
     dry_run: bool = False,
     force: bool = False,
     workers: int = 3,
@@ -441,7 +493,7 @@ def handle_url(
     resolved = resolve_entity(url)
     if resolved is None:
         console.print("[yellow]Could not resolve Spotify URL. Falling back to fallback handler...[/yellow]")
-        return _fallback_url(url, dry_run=dry_run, no_itunes=no_itunes, force=force)
+        return _fallback_url(url, dry_run=dry_run, no_itunes=no_itunes, no_deezer=no_deezer, force=force)
 
     tracks = resolved if isinstance(resolved, list) else [resolved]
     if not tracks:
@@ -477,6 +529,21 @@ def handle_url(
             track["resolved_year"] = canonical_year
             track["_itunes_cache"] = itunes_cache.get(track.get("id", ""), {})
 
+    if not no_deezer and len(tracks) > 1 and tracks[0].get("_source_type") == "album":
+        deezer_cache: dict[str, dict] = {}
+        console.print("[dim]Fetching Deezer metadata (album correction)...[/dim]")
+        for track in tracks:
+            dm = deezer_search(
+                _join_artists(track),
+                track.get("title", ""),
+            )
+            if dm and dm.get("ok"):
+                sid = track.get("id", "")
+                if sid:
+                    deezer_cache[sid] = dm
+        for track in tracks:
+            track["_deezer_cache"] = deezer_cache.get(track.get("id", ""), {})
+
     if dry_run:
         console.print(f"\n[bold]Would download {len(tracks)} track(s):[/bold]")
         for t in tracks:
@@ -485,11 +552,11 @@ def handle_url(
         return [{"status": "dry-run", "title": t.get("title", "?"), "artist": _join_artists(t), "duration": 0} for t in tracks]
 
     if len(tracks) >= 3 and workers > 1:
-        return _parallel_process(tracks, no_itunes=no_itunes, dry_run=False, force=force, workers=workers)
+        return _parallel_process(tracks, no_itunes=no_itunes, no_deezer=no_deezer, dry_run=False, force=force, workers=workers)
     else:
         results = []
         for t in tracks:
-            r = process_track(t, no_itunes=no_itunes, dry_run=False, force=force)
+            r = process_track(t, no_itunes=no_itunes, no_deezer=no_deezer, dry_run=False, force=force)
             results.append(r)
         return results
 
@@ -501,7 +568,7 @@ def _parallel_process(tracks: list[dict], **kwargs) -> list[dict]:
     total = len(tracks)
     results_map: dict[int, dict] = {}
     result_lock = threading.Lock()
-    track_kwargs = {k: v for k, v in kwargs.items() if k in ("no_itunes", "dry_run", "force", "perf_only")}
+    track_kwargs = {k: v for k, v in kwargs.items() if k in ("no_itunes", "no_deezer", "dry_run", "force", "perf_only")}
     max_workers = kwargs.get("workers", 3)
 
     with make_progress() as progress:
@@ -524,7 +591,7 @@ def _parallel_process(tracks: list[dict], **kwargs) -> list[dict]:
     return [results_map[i] for i in range(total)]
 
 
-def _fallback_url(url: str, *, dry_run: bool = False, no_itunes: bool = False, force: bool = False) -> list[dict]:
+def _fallback_url(url: str, *, dry_run: bool = False, no_itunes: bool = False, no_deezer: bool = False, force: bool = False) -> list[dict]:
     if dry_run:
         console.print(f"  [cyan]Would download from URL:[/cyan] {url}")
         return [{"status": "dry-run", "title": url, "artist": "?", "duration": 0}]
@@ -553,7 +620,7 @@ def _fallback_url(url: str, *, dry_run: bool = False, no_itunes: bool = False, f
                         t["cover_url"] = t.get("cover_url") or entry.get("cover_url", "")
                         t["track_number"] = entry.get("track_number", 0) or 0
                         t["_source_type"] = kind
-                        results.append(process_track(t, no_itunes=no_itunes, dry_run=False, force=force))
+                        results.append(process_track(t, no_itunes=no_itunes, no_deezer=no_deezer, dry_run=False, force=force))
                     else:
                         artist = entry.get("artist", "")
                         fallback = {
@@ -571,7 +638,7 @@ def _fallback_url(url: str, *, dry_run: bool = False, no_itunes: bool = False, f
                             "explicit": False,
                             "_source_type": kind,
                         }
-                        results.append(process_track(fallback, no_itunes=no_itunes, dry_run=False, force=force))
+                        results.append(process_track(fallback, no_itunes=no_itunes, no_deezer=no_deezer, dry_run=False, force=force))
                 if results:
                     return results
         except Exception as exc:
@@ -585,6 +652,7 @@ def handle_search_selection(
     song_meta: dict,
     *,
     no_itunes: bool = False,
+    no_deezer: bool = False,
     dry_run: bool = False,
     force: bool = False,
 ) -> dict:
@@ -608,4 +676,4 @@ def handle_search_selection(
         track_data = _spotify_client.get_track(spotify_id)
         if track_data:
             meta = _api_to_track_dict(track_data, spotify_id)
-    return process_track(meta, no_itunes=no_itunes, dry_run=dry_run, force=force)
+    return process_track(meta, no_itunes=no_itunes, no_deezer=no_deezer, dry_run=dry_run, force=force)

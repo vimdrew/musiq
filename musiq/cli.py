@@ -54,12 +54,13 @@ def cli():
 @cli.command()
 @click.argument("url")
 @click.option("--no-itunes", is_flag=True, help="Skip iTunes metadata lookup")
+@click.option("--no-deezer", is_flag=True, help="Skip Deezer metadata lookup")
 @click.option("--dry-run", is_flag=True, help="Show what would download without fetching")
 @click.option("--force", is_flag=True, help="Re-download even if already in history")
 @click.option("--workers", default=3, type=click.IntRange(1, 5), help="Parallel downloads for playlists (1-5)")
-def download(url: str, no_itunes: bool, dry_run: bool, force: bool, workers: int):
+def download(url: str, no_itunes: bool, no_deezer: bool, dry_run: bool, force: bool, workers: int):
     """Download a track, album, or playlist from a Spotify URL."""
-    results = handle_url(url, no_itunes=no_itunes, dry_run=dry_run, force=force, workers=workers)
+    results = handle_url(url, no_itunes=no_itunes, no_deezer=no_deezer, dry_run=dry_run, force=force, workers=workers)
 
     if not results:
         return
@@ -84,9 +85,10 @@ def download(url: str, no_itunes: bool, dry_run: bool, force: bool, workers: int
 @cli.command("playlist")
 @click.argument("url")
 @click.option("--no-itunes", is_flag=True, help="Skip iTunes metadata lookup")
+@click.option("--no-deezer", is_flag=True, help="Skip Deezer metadata lookup")
 @click.option("--dry-run", is_flag=True, help="Show what would download without fetching")
 @click.option("--force", is_flag=True, help="Re-download even if already in history")
-def playlist(url: str, no_itunes: bool, dry_run: bool, force: bool):
+def playlist(url: str, no_itunes: bool, no_deezer: bool, dry_run: bool, force: bool):
     """Download every track in a Spotify playlist and create a matching Navidrome playlist."""
     from musiq.spotify import extract_id_and_type
 
@@ -119,7 +121,7 @@ def playlist(url: str, no_itunes: bool, dry_run: bool, force: bool):
     results: list[dict] = []
     for i, track in enumerate(tracks, 1):
         console.print(f"\n[bold]({i}/{len(tracks)})[/bold]", end=" ")
-        r = process_track(track, no_itunes=no_itunes, dry_run=False, force=force)
+        r = process_track(track, no_itunes=no_itunes, no_deezer=no_deezer, dry_run=False, force=force)
         results.append(r)
 
     d = sum(1 for r in results if r.get("status") == "downloaded")
@@ -339,9 +341,10 @@ def _best_song_match(hits: list[dict], title: str, artist: str) -> str | None:
 @cli.command()
 @click.argument("query", nargs=-1, required=True)
 @click.option("--no-itunes", is_flag=True, help="Skip iTunes metadata lookup")
+@click.option("--no-deezer", is_flag=True, help="Skip Deezer metadata lookup")
 @click.option("--dry-run", is_flag=True, help="Show what would download without fetching")
 @click.option("--force", is_flag=True, help="Re-download even if already in history")
-def search(query: tuple[str, ...], no_itunes: bool, dry_run: bool, force: bool):
+def search(query: tuple[str, ...], no_itunes: bool, no_deezer: bool, dry_run: bool, force: bool):
     """Search and download your selection."""
     q = " ".join(query)
     console.print(f"[bold]Searching for:[/bold] {q}")
@@ -375,7 +378,7 @@ def search(query: tuple[str, ...], no_itunes: bool, dry_run: bool, force: bool):
     selected = results[choice - 1]
     console.print(f"\n[bold]Downloading:[/bold] {selected.get('title', '?')} — {selected.get('artist', '?')}")
 
-    result = handle_search_selection(selected, no_itunes=no_itunes, dry_run=dry_run, force=force)
+    result = handle_search_selection(selected, no_itunes=no_itunes, no_deezer=no_deezer, dry_run=dry_run, force=force)
     if result.get("status") == "downloaded":
         console.print(f"[green]✓ Downloaded {selected.get('title')}[/green]")
     elif result.get("status") == "skipped":

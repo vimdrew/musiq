@@ -1,0 +1,178 @@
+# Deezer API — Quick Reference
+
+Deezer exposes a public REST API with no authentication required for catalog
+search and metadata. All endpoints return JSON by default.
+
+Base URL: `https://api.deezer.com`
+
+---
+
+## Search by artist name
+
+Returns a ranked list of artist matches. Use this to resolve an artist to its
+numeric `id`.
+
+```
+GET https://api.deezer.com/search/artist?q=<query>
+```
+
+Top result example:
+
+```json
+{
+  "id": 1590752,
+  "name": "Young Thug",
+  "nb_fan": 1552508,
+  "nb_album": 141
+}
+```
+
+Fields returned:
+- `id` — Deezer artist ID
+- `name` — Artist name
+- `nb_fan` — Number of listeners / followers
+- `nb_album` — Number of albums / releases
+
+---
+
+## Search tracks by artist + title
+
+General track search. Combine artist and title in the query string.
+Results include nested `album` and `artist` objects with their own `id` and
+`title`.
+
+```
+GET https://api.deezer.com/search?q=<query>
+```
+
+Example query:
+
+```
+https://api.deezer.com/search?q=wyclef%20jean%20young%20thug
+```
+
+Top result:
+
+```json
+{
+  "id": 130914062,
+  "title": "Wyclef Jean",
+  "artist": { "id": 1590752, "name": "Young Thug" },
+  "album":  { "id": 13899072, "title": "JEFFERY" }
+}
+```
+
+### Advanced query syntax
+
+You can scope terms to specific fields with `field:value` (quotes around
+space-containing values):
+
+```
+GET https://api.deezer.com/search?q=track:"wyclef jean" artist:"young thug"
+```
+
+Note: Deezer's advanced field filtering can be unreliable for exact matches
+(the above may return zero results). The general `q=` free-text approach
+is more reliable.
+
+---
+
+## Get full track metadata
+
+The search response omits `release_date`, `duration`, and `genre_id` for
+individual tracks. Fetch the full track object to get these:
+
+```
+GET https://api.deezer.com/track/<track_id>
+```
+
+Fields:
+
+```json
+{
+  "id": 130914062,
+  "title": "Wyclef Jean",
+  "duration": 236,
+  "track_position": 1,
+  "release_date": "2016-08-26",
+  "artist": { "id": 1590752, "name": "Young Thug" },
+  "album": {
+    "id": 13899072,
+    "title": "JEFFERY",
+    "release_date": "2016-08-26"
+  }
+}
+```
+
+Key fields:
+- `duration` — Track length in seconds
+- `track_position` — Track number on the album
+- `release_date` — Inherited from album
+
+---
+
+## Get full album metadata (incl. genre)
+
+Genre info lives on the album object, not the track. Fetch it separately:
+
+```
+GET https://api.deezer.com/album/<album_id>
+```
+
+```json
+{
+  "id": 13899072,
+  "title": "JEFFERY",
+  "release_date": "2016-08-26",
+  "label": "300 Entertainment/Atl",
+  "record_type": "album",
+  "explicit_lyrics": true,
+  "genres": {
+    "data": [
+      { "id": 116, "name": "Rap/Hip Hop" }
+    ]
+  }
+}
+```
+
+Key fields:
+- `genres.data[].name` — List of genre names (array of objects with `id` and `name`)
+- `label` — Record label
+- `record_type` — e.g. `album`, `single`, `ep`
+- `explicit_lyrics` — `true` / `false`
+
+---
+
+## Summary of endpoints used
+
+| Step                       | Endpoint                                           |
+|----------------------------|----------------------------------------------------|
+| Resolve artist by name     | `GET /search/artist?q=<name>`                      |
+| Search tracks by title     | `GET /search?q=<artist+title>`                     |
+| Full track metadata        | `GET /track/<track_id>`                            |
+| Full album + genre metadata| `GET /album/<album_id>`                            |
+
+## Worked example
+
+Target: find album name, genre, and release date for the song
+"Wyclef Jean" by Young Thug.
+
+1. Search tracks:
+
+```bash
+curl -s "https://api.deezer.com/search?q=wyclef%20jean%20young%20thug"
+```
+
+   → First result has `id: 130914062`, `album.id: 13899072`.
+
+2. Fetch album:
+
+```bash
+curl -s "https://api.deezer.com/album/13899072"
+```
+
+   Result:
+
+   - Album: JEFFERY
+   - Release date: 2016-08-26
+   - Genre: Rap/Hip Hop

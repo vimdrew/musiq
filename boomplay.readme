@@ -1,0 +1,223 @@
+# Boomplay API — Quick Reference
+
+Two ways to reach Boomplay catalogue data:
+
+1. **Official Open API** (`openapi.boomplay.com`) — documented at
+   <https://developer.boomplay.com>, but requires a registered app
+   (`app_id` + `app_secret`) to mint an access token.
+2. **MusicAPI.com** (`api.musicapi.com`) — an aggregator that speaks
+   Boomplay's unofficial API on your behalf and returns one normalised
+   schema. Public catalogue search needs only your Client ID.
+
+The worked example at the bottom uses the MusicAPI route, which is the only
+one that succeeds without a Boomplay developer account.
+
+---
+
+## Official Boomplay Open API
+
+### Base URL & auth (client credentials flow)
+
+```
+POST https://openapi.boomplay.com/oauth/token
+Content-Type: application/json
+Accept-Language: en-US          # zh-CN, en-US, ... default en
+
+{"grant_type":"client_credentials","app_id":"<app_id>","app_secret":"<app_secret>"}
+```
+
+Response:
+
+```json
+{ "desc": null, "code": 0, "data": { "access_token": "...==", "expires_in": 7200 } }
+```
+
+Notes:
+- JS example in the docs also passes `grant_type: client_credentials`; the
+  curl sample omits `grant_type` — both field shapes appear in the docs.
+- Bad/unknown credentials → `4003 "appId or appSecret param is wrong !"`.
+- Token lasts 7200 s. There is no refresh version of this flow (refresh
+  tokens only come from the Implicit Grant / user flow).
+
+### Using the token
+
+Every data endpoint needs two headers:
+
+```
+Authorization: <access_token>        # raw token (docs curl uses it bare)
+app_id: <your app id>
+```
+
+Missing token → `-1 "authorization empty !"`.
+
+### Implicit grant (user token, optional)
+
+If you need a listener's *owned* data (favourites, own playlists):
+
+```
+GET https://www.boomplay.com/oauth/consent
+     ?response_type=token&client_id=...&scope=all&redirect_uri=...&state=...
+```
+
+then swap the returned code at `POST /oauth/userToken`. Response adds
+`user_id` and `refresh_token` (use at `/oauth/refreshToken` when expired).
+
+### Response envelope & error codes
+
+All endpoints return:
+
+```json
+{ "code": 0, "data": "...", "desc": "error desc" }
+```
+
+| code | meaning |
+|------|---------|
+| -1   | global business exception |
+| 0    | success |
+| 4001 | access token invalid |
+| 4002 | refresh token expired |
+| 4003 | parameter expired / bad app credentials |
+| 4005 | current limit exceeded |
+| 4006 | user not authorized or removed |
+| 5001 | server internal exception |
+
+### Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /search/v1?q=&type=&market=` | Search catalog; `type` ∈ `album,artist,playlist,track`, `market` = ISO 3166-1 alpha-2 |
+| `GET /track/v1/trackIds?ids=` | Tracks by Boomplay IDs (max 20, comma-separated) |
+| `GET /track/v1/isrcs?isrcs=` | Tracks by ISRC |
+| `GET /track/v1/artistTracks?artistId=` | An artist's tracks |
+| `GET /track/v1/plays?trackId=` | Stream counts of a track |
+| `GET /album/v1/albumIds?ids=` | Albums by IDs |
+| `GET /album/v1/upcs?upcs=` | Albums by UPC |
+| `GET /album/v1/artistAlbums?artistId=` | An artist's albums |
+| `GET /album/v1/plays?albumId=` | Stream counts of an album |
+| `GET /artist/v1/artistIds?ids=` | Artists by IDs |
+| `GET /playlist/v1/playlistIds?ids=` | Playlists by IDs (includes track list) |
+| `GET /user/v1/...`, `POST /user/v1/...` | User profile, own playlists, create playlist |
+| `GET /favourite/v1/...`, `POST /favourite/v1/...` | Favourite albums/tracks/playlists/artists |
+| `GET /chart/v1/...` | Weekly/daily charts, weekly top albums/artists |
+
+Track object shape (search + trackIds): `track_id`, `track_title`,
+`track_number`, `isrc`, `duration`, `album_id`, `album_title`, `genres`,
+`available_markets`, `web_url`, `mobile_url`, `artwork{width,height,url}`,
+`artists[{artist_id,artist_name,artist_role}]`.
+
+Host for all: `https://openapi.boomplay.com` (test UI uses
+`https://test.boomplay.com`).
+
+---
+
+## MusicAPI.com route (worked in practice)
+
+MusicAPI holds Boomplay's internal credentials and proxies catalogue reads
+through one REST interface. Public metadata search needs **no user auth**.
+
+### Auth (public endpoints)
+
+```
+Authorization: Token <clientId>
+Content-Type: application/json; charset=utf-8
+```
+
+- Client ID alone is enough for public search/inspect endpoints.
+- Client Secret pair → HTTP Basic `base64(clientId:clientSecret)` unlocks
+  private/user endpoints (backend only).
+- `GET /search/introspection` returns the supported service/source list
+  (`boomplay` is present, plus various others).
+
+### Public search
+
+```
+POST /public/search
+```
+
+Request body:
+
+```json
+{
+  "track": "Wyclef Jean",
+  "artist": "Young Thug",
+  "type": "track",          // enum: track | playlist | album
+  "sources": ["boomplay"]   // >=1 source, e.g. spotify, deezer, boomplay, ...
+}
+```
+
+Missing/unknown body fields are rejected with a Joi-style error, e.g.
+`"sources" is required`, `"type" is required`, `"query" is not allowed`.
+The song title lives in the **`track`** field (not `query`/`q`/`name`).
+
+Track response item:
+
+```json
+{
+  "source": "boomplay",
+  "status": "success",           // or "not_found"
+  "data": {
+    "externalId": "3672364",
+    "name": "Wyclef Jean",
+    "artistNames": ["Young Thug"],
+    "albumName": "JEFFERY",
+    "imageUrl": "https://source.boomplaymusic.com/..._464_464.jpg",
+    "previewUrl": null,
+    "isrc": "USAT21602475",
+    "duration": 236000,          // ms
+    "url": "https://www.boomplay.com/songs/3672364?srModel=openapi_freeyourmusic"
+  },
+  "type": "track"
+}
+```
+
+Rate limits: public `/public/*` = 1 req/min/IP (RapidAPI tier for more).
+
+---
+
+## Worked example — "Wyclef Jean" by Young Thug
+
+Target: fix the Boomplay-side metadata for the JEFFERY track.
+
+1. Search **via MusicAPI** (no Boomplay account needed):
+
+```bash
+curl "https://api.musicapi.com/public/search" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -H "Authorization: Token $MUSIC_API_ID" \
+  -d '{"track":"Wyclef Jean","artist":"Young Thug","type":"track","sources":["boomplay"]}'
+```
+
+2. Result (2026-09-16):
+
+| Field | Value |
+|-------|-------|
+| Boomplay track ID | `3672364` |
+| Title | Wyclef Jean |
+| Artist | Young Thug |
+| Album | JEFFERY |
+| ISRC | `USAT21602475` |
+| Duration | 236000 ms (3:56) |
+| Artwork | `https://source.boomplaymusic.com/group10/M00/7F/41/5dda6db103674705a6f1d557b57744c2_464_464.jpg` |
+| URL | `https://www.boomplay.com/songs/3672364` |
+
+3. Album search (`type: album`, track: "JEFFERY") → `status: not_found`.
+   Boomplay often carries no ISRC on releases (matches on artist + normalised
+   title), and its album search lookup is weaker than the track one.
+
+---
+
+## Current status (tested 2026-09-16)
+
+- **Official Boomplay Open API**: fully auth-gated. The `oauth/token`
+  endpoint rejects the stored `MUSIC_API_ID`/`MUSIC_API_SECRET` with
+  `4003 appId or appSecret param is wrong` — those credentials are MusicAPI
+  Client credentials, not a Boomplay dev app. Without a real Boomplay
+  `app_id`/`app_secret`, search+metadata endpoints return
+  `-1 authorization empty`.
+- **MusicAPI.com**: works. Client-ID token auth succeeded, introspection
+  lists `boomplay` as a source, and `/public/search` returned clean
+  complete metadata for the Wyclef Jean / Young Thug track.
+
+**Conclusion:** drive Boomplay through MusicAPI's `POST /public/search` with
+`Authorization: Token $MUSIC_API_ID`. The official Boomplay Open API is only
+reachable with a registered Boomplay developer app.

@@ -24,6 +24,14 @@ from musiq.display import console
 
 _TOP_N = 10
 
+# Workaround for yt-dlp/yt-dlp#17456: the default android_vr player client
+# requires a GVS PO token yt-dlp doesn't supply, causing 403 on the video
+# CDN request. Pin the player clients to ones without that gap. Revisit
+# once upstream fixes android_vr PO-token support properly.
+YDL_YOUTUBE_EXTRACTOR_ARGS: dict[str, dict[str, list[str]]] = {
+    "youtube": {"player_client": ["web_embedded", "web", "tv", "android"]},
+}
+
 _SANE_MIN_SEC = 120
 _SANE_MAX_SEC = 600
 _DUR_VERY_CLOSE_SEC = 10
@@ -217,6 +225,7 @@ def search_best_audio(
         "skip_download": True,
         "socket_timeout": 15,
         "noplaylist": True,
+        "extractor_args": YDL_YOUTUBE_EXTRACTOR_ARGS,
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:

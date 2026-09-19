@@ -1,0 +1,90 @@
+# Amazon Music API — Quick Reference
+
+**Unofficial** wrapper around Amazon's internal / Music APIs. Hosted at:
+
+```
+https://amz.dezalty.com
+```
+
+Backend status is public; all catalog data is behind a JWT.
+
+---
+
+## Auth (required)
+
+Every data endpoint requires:
+
+```
+Authorization: Bearer <session-token>
+```
+
+Without it → `401 {"detail":{"code":"missing_session_token", ...}}`.
+
+A session token is a JWT minted from **your own Amazon account** via one of:
+
+| Endpoint | Method | What you provide |
+|---|---|---|
+| `/auth/login` | POST | Amazon cookies as JSON/text (`ubid-main`, `at-main` retained; body `{"content": "...", "format": "auto", "expires_in": 86400}`) |
+| `/auth/login/file` | POST | Upload a cookie file |
+| `/auth/mobile/oauth-url` | GET | Generates Amazon Mobile OAuth PKCE registration URL |
+| `/auth/mobile/exchange` | POST | Complete OAuth flow & issue JWT |
+| `/auth/login/mobile` | POST | Existing `credentials_mobile.json` |
+
+Token lifetime configurable 5 min – 30 days (default 1 day).
+
+> Note: an even easier browser flow is advertised at `amz.dezalty.com/login`
+> (star the GitHub repo to get tokens). The login page returns 404 on the API
+> path directly — it's a web app, not a REST endpoint.
+
+---
+
+## Search
+
+```
+GET /search?query={query}&type={type}
+```
+
+`type` ∈ track, album, artist, playlist, ... Returns Amazon result items keyed by
+**ASIN** (e.g. `B077F6QG2S`).
+
+## Metadata endpoints (all by ASIN)
+
+| Endpoint | Description |
+|---|---|
+| `GET /tracks/{asin}` | Track metadata (title, album, artist, release info) |
+| `GET /albums/{asin}` | Album + track list |
+| `GET /artists/{asin}` | Artist metadata + discography |
+| `GET /playlists/{asin}` | Catalog playlist |
+| `GET /playlists/{asin}/community` | Community playlist |
+| `GET /podcasts/{asin}`, `GET /episodes` | Podcast content |
+| `GET /tracks/{asin}/lyrics` | Lyrics |
+| `GET /tracks/{asin}/streams` | Available DASH streams |
+| `GET /tracks/{asin}/streams/{quality}` | Pick a stream by quality |
+
+## Playback / DRM
+
+- `POST /manifests/parse` — parse DASH manifest
+- `POST /widevine/key` — acquire Widevine content key (PSSH → key)
+
+Quality ladder: Low(48k OPUS) → Medium(192k) → Normal(320k) → High(≤16-bit
+FLAC) → Master(24-bit ≤96kHz) → Max(24-bit ≤192kHz).
+
+---
+
+## Current status (tested 2026-09-16)
+
+- `/health` → `{"status":true,"service":"amazon-music-api","version":"source"}`
+- `/search` and `/session` → `401 missing_session_token` without a JWT.
+- **Blocked:** the "Wyclef Jean / Young Thug" metadata lookup cannot run without
+  a session JWT, and minting one requires real Amazon account cookies or mobile
+  OAuth credentials.
+
+**Conclusion:** like Qobuz, this API is account-gated. Provide Amazon session
+cookies (or complete mobile OAuth) to get a Bearer token, then the search flow is:
+
+```
+POST /auth/login  -> JWT
+GET /search?query=wyclef jean young thug&type=track  (Bearer)
+GET /tracks/{asin}
+GET /albums/{asin}
+```

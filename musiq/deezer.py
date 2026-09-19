@@ -9,6 +9,9 @@ track's album is fetched to supply genre + release year.
 Read-only, never raises.
 """
 
+import threading
+import time
+
 import requests
 from rapidfuzz import fuzz
 
@@ -17,6 +20,29 @@ from musiq.utils import artist_match as artist_match_confidence
 
 _API_ROOT = "https://api.deezer.com"
 _TIMEOUT = 10
+
+# Deezer's public API allows ~50 requests per 5 seconds. Space calls to
+# ~8/sec so album batches and parallel download workers never get
+# throttled mid-run (mirrors the rate-limit workarounds used for the
+# Spotify/YouTube calls elsewhere in this codebase).
+_MIN_REQUEST_INTERVAL = 0.12
+_RATE_LOCK = threading.Lock()
+_last_request_at = 0.0
+
+# Album detail shares one payload per album across tracks; cache it so
+# a 20-track album batch only pays for a single album request.
+_ALBUM_DETAIL_CACHE: dict[int | str, dict] = {}
+_ALBUM_CACHE_LOCK = threading.Lock()
+
+
+def _get(url: str, params: dict | None = None) -> requests.Response:
+    global _last_request_at
+    with _RATE_LOCK:
+        wait = _MIN_REQUEST_INTERVAL - (time.monotonic() - _last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at = time.monotonic()
+    return requests.get(url, params=params, timeout=_TIMEOUT)
 
 
 def _empty() -> dict:
@@ -47,10 +73,9 @@ def _title_ratio(candidate: str, wanted: str) -> float:
 
 def _search_tracks(artist: str, title: str) -> list[dict]:
     try:
-        resp = requests.get(
+        resp = _get(
             f"{_API_ROOT}/search",
             params={"q": f"{artist} {title}"},
-            timeout=_TIMEOUT,
         )
         resp.raise_for_status()
         return [r for r in resp.json().get("data") or [] if isinstance(r, dict)]
@@ -60,12 +85,20 @@ def _search_tracks(artist: str, title: str) -> list[dict]:
 
 
 def _album_detail(album_id: int | str) -> dict:
+    key = int(album_id) if str(album_id).isdigit() else str(album_id)
+    with _ALBUM_CACHE_LOCK:
+        if key in _ALBUM_DETAIL_CACHE:
+            return _ALBUM_DETAIL_CACHE[key]
     try:
-        resp = requests.get(f"{_API_ROOT}/album/{album_id}", timeout=_TIMEOUT)
+        resp = _get(f"{_API_ROOT}/album/{album_id}")
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
     except Exception:
         return {}
+    with _ALBUM_CACHE_LOCK:
+        if key not in _ALBUM_DETAIL_CACHE:
+            _ALBUM_DETAIL_CACHE[key] = data
+    return data
 
 
 def _genre_from_album(album: dict) -> str:
