@@ -1,3 +1,5 @@
+import sys
+
 from rich.console import Console
 from rich.table import Table
 from rich.progress import (
@@ -11,6 +13,7 @@ from rich import box
 from rich.text import Text
 
 console = Console()
+err_console = Console(file=sys.stderr)
 
 
 def make_progress() -> Progress:

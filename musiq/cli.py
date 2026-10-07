@@ -11,7 +11,7 @@ from rich import box
 from rich.markup import escape
 from rich.table import Table
 
-from musiq.display import console, summary_table, stats_table
+from musiq.display import console, err_console, summary_table, stats_table
 from musiq.deezer import fetch_track_metadata as deezer_meta
 from musiq.downloader import (
     handle_url, handle_search_selection, process_track, _ytm_download,
@@ -421,6 +421,38 @@ def stats():
         console.print("[yellow]No performance data yet. Download some tracks first.[/yellow]")
         return
     console.print(stats_table(s))
+
+
+@cli.command("unplayed")
+@click.option("-o", "--out", type=click.Path(), default=None,
+              help="Write the plain list to a file instead of stdout")
+def unplayed(out: str | None):
+    """List Navidrome tracks that have never been played (play count 0).
+
+    Prints a plain, pipe/redirect-friendly list of present songs (one
+    'Artist - Title' per line). Nothing is written back to Navidrome.
+    """
+    nd = navidrome.ensure_navidrome_config()
+    if nd is None:
+        console.print("[yellow]Skipping — no Navidrome config[/yellow]")
+        return
+    base_url, user, password = nd
+
+    try:
+        songs = navidrome.get_unplayed_songs(base_url, user, password)
+    except Exception as exc:
+        console.print(f"[red]✖ Could not query Navidrome: {exc}[/red]")
+        raise SystemExit(1)
+
+    lines = [f"{s['artist']} - {s['title']}" for s in songs]
+
+    if out:
+        Path(out).write_text("\n".join(lines) + ("\n" if lines else ""))
+        err_console.print(f"[green]✓[/green] Wrote {len(lines)} unplayed track(s) to {out}")
+    else:
+        if lines:
+            click.echo("\n".join(lines))
+        err_console.print(f"[dim]{len(lines)} unplayed track(s)[/dim]")
 
 
 def _normalize(s: str) -> str:

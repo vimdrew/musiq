@@ -123,6 +123,12 @@ musiq history --clear
 
 # Show performance stats
 musiq stats
+
+# List Navidrome tracks that have never been played (play count 0),
+# present-only and pipe/redirect friendly; the count goes to stderr
+musiq unplayed
+musiq unplayed > unplayed.txt
+musiq unplayed --out unplayed.txt
 ```
 
 ## How it works

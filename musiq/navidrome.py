@@ -181,6 +181,44 @@ def search3(base_url: str, user: str, password: str, query: str) -> list[dict]:
         return []
 
 
+# ── Unplayed songs ────────────────────────────────────────────────
+
+def get_unplayed_songs(base_url: str, user: str, password: str, page_size: int = 500) -> list[dict]:
+    """Return present Navidrome songs that have never been played.
+
+    Pages Subsonic search3 with an empty query (which returns the whole
+    present library and already excludes missing files) and keeps rows
+    whose playCount is 0 or absent. Results are sorted by artist, album
+    then title, case-insensitively.
+    """
+    songs: list[dict] = []
+    offset = 0
+    while True:
+        status = _api_call(
+            base_url, user, password, "search3",
+            query="", songCount=page_size, songOffset=offset,
+        )
+        page = (status.get("searchResult3") or {}).get("song", [])
+        if not isinstance(page, list) or not page:
+            break
+        for s in page:
+            if (s.get("playCount") or 0) == 0:
+                songs.append({
+                    "id": s.get("id", ""),
+                    "title": s.get("title", ""),
+                    "artist": s.get("artist", ""),
+                    "album": s.get("album", ""),
+                    "play_count": s.get("playCount") or 0,
+                    "played": s.get("played"),
+                })
+        offset += len(page)
+        if len(page) < page_size:
+            break
+
+    songs.sort(key=lambda x: (x["artist"].lower(), x["album"].lower(), x["title"].lower()))
+    return songs
+
+
 # ── Playlists ─────────────────────────────────────────────────────
 
 def get_playlists(base_url: str, user: str, password: str) -> list[dict]:
