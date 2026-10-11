@@ -11,6 +11,7 @@ from rich import box
 from rich.markup import escape
 from rich.table import Table
 
+from musiq.config import music_dir
 from musiq.display import console, err_console, summary_table, stats_table
 from musiq.deezer import fetch_track_metadata as deezer_meta
 from musiq.downloader import (
@@ -512,7 +513,7 @@ def _select_track(music_dir: Path, query: str) -> Path | None:
     console.print(f"[bold]Searching library for:[/bold] {query}")
     hits = _find_tracks(music_dir, query)
     if not hits:
-        console.print("[red]No matching tracks found in ~/Music[/red]")
+        console.print(f"[red]No matching tracks found in {music_dir}[/red]")
         return None
 
     if len(hits) > 1:
@@ -536,11 +537,11 @@ def _select_track(music_dir: Path, query: str) -> Path | None:
 
 
 def _music_dir() -> Path:
-    music_dir = Path.home() / "Music"
-    if not music_dir.is_dir():
-        console.print(f"[red]✖ Music library not found: {music_dir}[/red]")
+    music_dir_path = music_dir()
+    if not music_dir_path.is_dir():
+        console.print(f"[red]✖ Music library not found: {music_dir_path}[/red]")
         raise SystemExit(1)
-    return music_dir
+    return music_dir_path
 
 
 @cli.command("import")

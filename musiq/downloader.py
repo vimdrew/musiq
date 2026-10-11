@@ -7,6 +7,7 @@ from pathlib import Path
 
 import yt_dlp
 
+from musiq.config import music_dir
 from musiq.display import console
 from musiq.deezer import fetch_track_metadata as deezer_search
 from musiq.history import track_exists, add_download, insert_perf
@@ -17,7 +18,6 @@ from musiq.tagger import tag_file
 from musiq.youtube import YDL_YOUTUBE_EXTRACTOR_ARGS, search_best_audio
 from musiq.ytmusic import search_song
 
-OUTPUT_BASE = Path.home() / "Music"
 MUSIQ_DIR = Path.home() / ".musiq"
 
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*]')
@@ -409,7 +409,7 @@ def process_track(
 
         album, cover_url, genre, year = _resolve_metadata(meta, itunes_meta, deezer_meta, title)
 
-        album_dir = OUTPUT_BASE / sanitize(_folder_artist(meta, artist)) / sanitize(album)
+        album_dir = music_dir() / sanitize(_folder_artist(meta, artist)) / sanitize(album)
         album_dir.mkdir(parents=True, exist_ok=True)
         out_stem = f"{track_num:02d} - {sanitize(artist)} - {sanitize(title)}"
         final_path = album_dir / f"{out_stem}.mp3"

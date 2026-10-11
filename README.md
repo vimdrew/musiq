@@ -23,8 +23,30 @@ scrapes the **Spotify embed** + **iTunes Search API** for metadata.
 
 ## Configuration
 
-Optional settings go in `~/.musiq/config` (`KEY=VALUE` lines), same place as
-the Spotify/Navidrome credentials:
+The output folder (your music library) is set by the `MUSIC_DIR` line in a
+repo-local `.env` file. A committed template lives at **`.env.example`** —
+copy it once, then edit that line to move your library:
+
+```bash
+cp .env.example .env
+```
+
+```ini
+MUSIC_DIR=~/Music
+```
+
+`.env` is git-ignored, so your personal path stays out of version control.
+`MUSIC_DIR` is used by every command that writes to or reads from the
+library (`download`, `import`, `organize`, `view`, `retag`, `fix`).
+Resolution order, highest priority first:
+
+1. `MUSIC_DIR` environment variable
+2. the repo `.env` file
+3. `~/.musiq/config`
+4. `~/Music` (default)
+
+Optional service settings go in `~/.musiq/config` (`KEY=VALUE` lines), same
+place as the Spotify/Navidrome credentials:
 
 ```ini
 LASTFM_API_KEY=your-lastfm-api-key
@@ -167,6 +189,8 @@ fragility of API-free scraping.
 
 ## Output
 
+By default (with `MUSIC_DIR=~/Music` in `.env`):
+
 ```
 ~/Music/
   Daft Punk/
@@ -176,6 +200,8 @@ fragility of API-free scraping.
   ...
 ```
 
+Change the `MUSIC_DIR` line in `.env` to write somewhere else.
+
 ## Project structure
 
 ```
@@ -183,6 +209,7 @@ musiq/
 ├── musiq/
 │   ├── __init__.py
 │   ├── cli.py          # click commands
+│   ├── config.py       # repo .env / ~/.musiq/config resolution (MUSIC_DIR)
 │   ├── spotify.py      # __NEXT_DATA__ scraper + Spotify search
 │   ├── itunes.py       # iTunes Search API client
 │   ├── deezer.py       # Deezer public API client (download + retag: album/genre/year)
@@ -195,6 +222,7 @@ musiq/
 │   ├── history.py      # SQLite history + perf_log
 │   ├── perf.py         # Timer + PerfRecord dataclass
 │   └── display.py      # rich tables, progress bars
+├── .env.example        # template — copy to .env and set MUSIC_DIR
 ├── pyproject.toml
 └── README.md
 ```

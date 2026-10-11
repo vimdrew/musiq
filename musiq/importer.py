@@ -7,9 +7,9 @@ import click
 from rich import box
 from rich.table import Table
 
+from musiq.config import music_dir
 from musiq.display import console
 from musiq.downloader import (
-    OUTPUT_BASE,
     _build_ydl_opts,
     _ytm_download,
     primary_artist,
@@ -225,7 +225,7 @@ def import_youtube(url: str) -> dict:
     album_artist = meta["album_artist"] or artist
 
     # ── Destination resolution (no download needed) ──────────────
-    album_dir = OUTPUT_BASE / sanitize(primary_artist(album_artist)) / sanitize(album)
+    album_dir = music_dir() / sanitize(primary_artist(album_artist)) / sanitize(album)
     out_stem = f"{meta['track_num']:02d} - {sanitize(artist)} - {sanitize(title)}"
     final_path = album_dir / f"{out_stem}.mp3"
 

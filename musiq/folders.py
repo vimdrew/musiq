@@ -7,6 +7,7 @@ from pathlib import Path
 
 from mutagen.id3 import ID3, ID3NoHeaderError
 
+from musiq.config import music_dir
 from musiq.display import console
 from musiq.downloader import sanitize
 
@@ -157,7 +158,7 @@ def rename_folder(issue: FolderIssue, *, dry_run: bool = True) -> str:
     if dry_run:
         return "pending"
 
-    artist_path = Path.home() / "Music" / issue.artist_folder
+    artist_path = music_dir() / issue.artist_folder
     source = artist_path / issue.album_folder
     target = artist_path / issue.target_folder
 
