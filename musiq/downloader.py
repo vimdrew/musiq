@@ -148,7 +148,12 @@ def _resolve_metadata(meta: dict, itunes_meta: dict, deezer_meta: dict, title: s
     )
 
     album = meta.get("album") or ""
-    if deezer_confident and deezer_meta.get("album"):
+    if meta.get("_album_locked"):
+        # Album batch: the canonical album (majority-voted across the whole
+        # batch in _enrich_album_batch) is authoritative — don't let a
+        # per-track lookup tag this song with a different release.
+        pass
+    elif deezer_confident and deezer_meta.get("album"):
         album = deezer_meta["album"]
     elif album.endswith("- Single") and itunes_meta.get("album"):
         album = itunes_meta["album"]
@@ -183,6 +188,114 @@ def _resolve_metadata(meta: dict, itunes_meta: dict, deezer_meta: dict, title: s
         year = meta.get("resolved_year") or itunes_meta.get("year", "")
 
     return album, cover_url, genre, year
+
+
+def _canonical_album(tracks: list[dict]) -> str:
+    """Majority-vote the album name across an album batch.
+
+    Every track contributes its Spotify album plus any confident Deezer /
+    iTunes album returned for that track. The most common name wins, so a
+    track whose per-track lookup landed on a single / EP / compilation no
+    longer tags itself with a one-off album name. Tie-breaks: the exact
+    Spotify album name first, then higher summed confidence, then more
+    Deezer votes, then the first name in sorted order (deterministic).
+    """
+    votes: dict[str, int] = {}
+    confidence: dict[str, float] = {}
+    deezer_votes: dict[str, int] = {}
+    spotify_album = tracks[0].get("album", "") if tracks else ""
+
+    for track in tracks:
+        candidates: list[tuple[str, float, bool]] = []  # (name, confidence, is_deezer)
+        if track.get("album"):
+            candidates.append((track["album"], 1.0, False))
+        dm = track.get("_deezer_cache") or {}
+        if dm.get("ok") and dm.get("confidence", 0.0) >= _DEEZER_CONFIDENCE and dm.get("album"):
+            candidates.append((dm["album"], dm.get("confidence", 1.0), True))
+        it = track.get("_itunes_cache") or {}
+        if it.get("confidence", 0.0) >= _CONFIDENCE_THRESHOLD and it.get("album"):
+            candidates.append((it["album"], it.get("confidence", 1.0), False))
+
+        for name, conf, is_deezer in candidates:
+            votes[name] = votes.get(name, 0) + 1
+            confidence[name] = confidence.get(name, 0.0) + conf
+            deezer_votes[name] = deezer_votes.get(name, 0) + int(is_deezer)
+
+    if not votes:
+        return spotify_album
+
+    def key(name: str):
+        return (
+            votes[name],
+            int(name == spotify_album),
+            confidence[name],
+            deezer_votes[name],
+        )
+
+    return max(sorted(votes), key=key)
+
+
+def _enrich_album_batch(tracks: list[dict], *, no_itunes: bool = False, no_deezer: bool = False) -> None:
+    """Enrich an album batch once, so every track shares one canonical album.
+
+    Populates each track's ``_itunes_cache`` / ``_deezer_cache``, votes a
+    canonical genre/year (iTunes) and a canonical album name across the
+    whole batch, then locks the album so no individual track tags itself
+    with a different release. Only applies to ``album`` sources — playlists
+    legitimately span many albums and are left as-is.
+    """
+    if len(tracks) <= 1 or tracks[0].get("_source_type") != "album":
+        return
+
+    if not no_itunes:
+        itunes_cache: dict[str, dict] = {}
+        genre_votes: dict[str, int] = {}
+        year_votes: dict[str, int] = {}
+        console.print("[dim]Fetching iTunes metadata (genre/year enrichment)...[/dim]")
+        for track in tracks:
+            meta = itunes_search(
+                _join_artists(track),
+                track.get("title", ""),
+            )
+            if meta:
+                sid = track.get("id", "")
+                if sid:
+                    itunes_cache[sid] = meta
+                confidence = meta.get("confidence", 0.0)
+                if confidence >= _CONFIDENCE_THRESHOLD:
+                    if meta.get("genre"):
+                        genre_votes[meta["genre"]] = genre_votes.get(meta["genre"], 0) + 1
+                    if meta.get("year"):
+                        year_votes[str(meta["year"])] = year_votes.get(str(meta["year"]), 0) + 1
+
+        canonical_genre = max(genre_votes, key=genre_votes.get) if genre_votes else ""
+        canonical_year = max(year_votes, key=year_votes.get) if year_votes else ""
+
+        for track in tracks:
+            track["resolved_genre"] = canonical_genre
+            track["resolved_year"] = canonical_year
+            track["_itunes_cache"] = itunes_cache.get(track.get("id", ""), {})
+
+    if not no_deezer:
+        deezer_cache: dict[str, dict] = {}
+        console.print("[dim]Fetching Deezer metadata (album correction)...[/dim]")
+        for track in tracks:
+            dm = deezer_search(
+                _join_artists(track),
+                track.get("title", ""),
+            )
+            if dm and dm.get("ok"):
+                sid = track.get("id", "")
+                if sid:
+                    deezer_cache[sid] = dm
+        for track in tracks:
+            track["_deezer_cache"] = deezer_cache.get(track.get("id", ""), {})
+
+    canonical_album = _canonical_album(tracks)
+    if canonical_album:
+        for track in tracks:
+            track["album"] = canonical_album
+            track["_album_locked"] = True
 
 
 def _build_ydl_opts(temp_dir: Path) -> dict:
@@ -500,49 +613,8 @@ def handle_url(
         console.print("[red]✖ No tracks found from URL[/red]")
         return []
 
-    if not no_itunes and len(tracks) > 1 and tracks[0].get("_source_type") == "album":
-        itunes_cache: dict[str, dict] = {}
-        genre_votes: dict[str, int] = {}
-        year_votes: dict[str, int] = {}
-        console.print("[dim]Fetching iTunes metadata (genre/year enrichment)...[/dim]")
-        for track in tracks:
-            meta = itunes_search(
-                _join_artists(track),
-                track.get("title", ""),
-            )
-            if meta:
-                sid = track.get("id", "")
-                if sid:
-                    itunes_cache[sid] = meta
-                confidence = meta.get("confidence", 0.0)
-                if confidence >= _CONFIDENCE_THRESHOLD:
-                    if meta.get("genre"):
-                        genre_votes[meta["genre"]] = genre_votes.get(meta["genre"], 0) + 1
-                    if meta.get("year"):
-                        year_votes[str(meta["year"])] = year_votes.get(str(meta["year"]), 0) + 1
-
-        canonical_genre = max(genre_votes, key=genre_votes.get) if genre_votes else ""
-        canonical_year = max(year_votes, key=year_votes.get) if year_votes else ""
-
-        for track in tracks:
-            track["resolved_genre"] = canonical_genre
-            track["resolved_year"] = canonical_year
-            track["_itunes_cache"] = itunes_cache.get(track.get("id", ""), {})
-
-    if not no_deezer and len(tracks) > 1 and tracks[0].get("_source_type") == "album":
-        deezer_cache: dict[str, dict] = {}
-        console.print("[dim]Fetching Deezer metadata (album correction)...[/dim]")
-        for track in tracks:
-            dm = deezer_search(
-                _join_artists(track),
-                track.get("title", ""),
-            )
-            if dm and dm.get("ok"):
-                sid = track.get("id", "")
-                if sid:
-                    deezer_cache[sid] = dm
-        for track in tracks:
-            track["_deezer_cache"] = deezer_cache.get(track.get("id", ""), {})
+    if len(tracks) > 1 and tracks[0].get("_source_type") == "album":
+        _enrich_album_batch(tracks, no_itunes=no_itunes, no_deezer=no_deezer)
 
     if dry_run:
         console.print(f"\n[bold]Would download {len(tracks)} track(s):[/bold]")
@@ -610,7 +682,7 @@ def _fallback_url(url: str, *, dry_run: bool = False, no_itunes: bool = False, n
         try:
             tracks_data = resolve_embed_track_list(kind, sid)
             if tracks_data:
-                results = []
+                tracks = []
                 for entry in tracks_data:
                     t = resolve_track(f"https://open.spotify.com/track/{entry['id']}")
                     if t:
@@ -620,10 +692,10 @@ def _fallback_url(url: str, *, dry_run: bool = False, no_itunes: bool = False, n
                         t["cover_url"] = t.get("cover_url") or entry.get("cover_url", "")
                         t["track_number"] = entry.get("track_number", 0) or 0
                         t["_source_type"] = kind
-                        results.append(process_track(t, no_itunes=no_itunes, no_deezer=no_deezer, dry_run=False, force=force))
+                        tracks.append(t)
                     else:
                         artist = entry.get("artist", "")
-                        fallback = {
+                        tracks.append({
                             "id": entry["id"],
                             "title": entry.get("title", ""),
                             "artist": artist,
@@ -637,10 +709,16 @@ def _fallback_url(url: str, *, dry_run: bool = False, no_itunes: bool = False, n
                             "release_date": "",
                             "explicit": False,
                             "_source_type": kind,
-                        }
-                        results.append(process_track(fallback, no_itunes=no_itunes, no_deezer=no_deezer, dry_run=False, force=force))
-                if results:
-                    return results
+                        })
+                if tracks:
+                    # Same batch canonicalisation as the primary path: every
+                    # track of a fallback album gets the majority-voted album.
+                    if len(tracks) > 1 and kind == "album":
+                        _enrich_album_batch(tracks, no_itunes=no_itunes, no_deezer=no_deezer)
+                    return [
+                        process_track(t, no_itunes=no_itunes, no_deezer=no_deezer, dry_run=False, force=force)
+                        for t in tracks
+                    ]
         except Exception as exc:
             console.print(f"[yellow]⚠ Fallback handler failed: {exc}[/yellow]")
 

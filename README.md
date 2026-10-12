@@ -165,6 +165,11 @@ musiq unplayed --out unplayed.txt
 6. **Save** to `~/Music/<Artist>/<Album>/<NN - Artist - Title.mp3>`
 7. **Record** in SQLite history + performance log
 
+For **album downloads**, iTunes/Deezer lookups (and the album name) are decided
+once per batch: the per-track hits are majority-voted so every song shares the
+same canonical album, genre and year — a track whose Deezer hit landed on a
+single/EP/compilation can't tag itself with a different album than the rest.
+
 ### `musiq import` pipeline
 
 1. **Resolve** YouTube video metadata (yt-dlp, no download)
